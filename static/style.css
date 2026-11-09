@@ -85,3 +85,6 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 20px 0; }
 .thumbs a { display: block; border-radius: 8px; overflow: hidden; border: 2px solid transparent; }
 .thumbs a:hover { border-color: var(--accent); }
 .thumbs img { width: 100%; display: block; }
+.titleOpts { display: grid; gap: 6px; margin-top: 8px; }
+.titleOpts .opt { text-align: left; font-weight: 500; font-size: 13px; padding: 6px 10px; background: #11141b; }
+.titleOpts .opt.on { border-color: var(--accent); color: var(--accent); }

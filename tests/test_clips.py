@@ -4,7 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import server
-from clipmaker import compose, moments
+from clipmaker import compose, copywrite, moments
 from clipmaker import youtube as yt
 
 
@@ -128,6 +128,11 @@ def test_server_end_to_end(fake_youtube, tmp_path):
     assert abs(out["duration"] - (server.INTRO_LEN + 12 + 2.6 + server.OUTRO_LEN)) < 0.8
     desc = v["project"]["youtube"]["description"]
     assert "https://youtu.be/" in desc and "#3 Funny video" in desc and "0:00 Intro" in desc
+    yt_copy = v["project"]["youtube"]
+    assert len(yt_copy["titles"]) >= 3 and yt_copy["title"] in yt_copy["titles"]
+    assert desc.startswith(yt_copy["hook"]) and "#1" in yt_copy["hook"]                 # lời dẫn nhử tới #1
+    again = c.post(f"/api/projects/{pid}/copy").json()["project"]["youtube"]
+    assert "#3 Funny video" in again["description"]
     for i in (1, 2, 3):
         assert c.get(f"/api/projects/{pid}/files/thumb_{i}.jpg").headers["content-type"] == "image/jpeg"
     assert (tmp_path / "data" / pid / "subs").exists()
@@ -153,3 +158,20 @@ def test_same_keyword_gives_different_clips_next_time(fake_youtube):
     used = [cl for cl in v["project"]["clips"] if cl["id"] in plan1]
     assert used and all("♻ Đã dùng ở video trước" in cl["reasons"] for cl in used)
     assert [x["id"] for x in v["plan"]] != plan1
+
+
+def test_copy_quotes_the_moment():
+    words = [(100.0, "so"), (100.4, "I"), (100.8, "told"), (101.2, "him"), (101.6, "you're"), (102.0, "not"),
+             (102.4, "my"), (102.8, "dad?"), (106.0, "[Laughter]")]
+    clip = {"start": 98.0, "end": 108.0, "peak": 103}
+    assert copywrite.spoken_line(words, clip) == "So I told him you're not my dad?"
+    assert copywrite.clean_comment("3:15 @bob he really said that 😂😂") == "he really said that 😂😂"
+    assert copywrite.clean_comment("2:10 😂") == ""
+    assert copywrite.topic("celebrity funny moments") == "Celebrity"
+    items = [{"num": 2, "ts": "0:04", "line": "", "comment": "the face he made 😭"},
+             {"num": 1, "ts": "0:20", "line": "You're not my dad?", "comment": ""}]
+    out = copywrite.make("celebrity funny moments", items, 2, "0:00 Intro", "- a", seed=1)
+    assert "You're not my dad" in out["hook"] and "0:20" in out["hook"] and "the face he made" in out["hook"]
+    assert any("You're not my dad?" in t for t in out["titles"]) and all(len(t) <= 100 for t in out["titles"])
+    assert "Moments Moments" not in " ".join(out["titles"]) and "#celebrity" in out["description"]
+    assert copywrite.make("celebrity funny moments", items, 2, "", "", seed=2) != out     # viết lại ra bản khác

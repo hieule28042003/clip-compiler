@@ -230,8 +230,23 @@ function showOutput() {
     a.querySelector("img").src = `${base}thumb_${i}.jpg?v=${P.output_stamp}`;
     th.appendChild(a);
   }
-  if (P.youtube) { $("#ytTitle").value = P.youtube.title; $("#ytDesc").value = P.youtube.description; }
+  if (P.youtube) showCopy(P.youtube);
 }
+
+function showCopy(y) {
+  $("#ytTitle").value = y.title; $("#ytDesc").value = y.description;
+  const box = $("#titleOpts"); box.innerHTML = "";
+  for (const t of y.titles || []) {
+    const b = document.createElement("button");
+    b.className = "opt" + (t === y.title ? " on" : ""); b.textContent = t; b.title = `${t.length} ký tự`;
+    b.onclick = () => { $("#ytTitle").value = t; $$("#titleOpts .opt").forEach((x) => x.classList.toggle("on", x === b)); };
+    box.appendChild(b);
+  }
+}
+$("#rewriteBtn").onclick = async () => {
+  try { V = await api(`/api/projects/${V.project.id}/copy`, { method: "POST" }); showCopy(V.project.youtube); }
+  catch (e) { alert(e.message); }
+};
 
 function poll() {
   clearTimeout(pollTimer);

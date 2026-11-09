@@ -88,10 +88,13 @@
         <a id="dlVideo" class="link primary">⬇ Tải video</a>
         <a class="link" href="https://studio.youtube.com" target="_blank" rel="noopener">YouTube Studio ↗</a>
       </div>
-      <label class="lbl">Tiêu đề YouTube <button class="mini" data-copy="ytTitle">Copy</button></label>
+      <label class="lbl">Tiêu đề YouTube
+        <span><button class="mini" id="rewriteBtn" title="Mẫu câu khác">🎲 Viết lại</button>
+        <button class="mini" data-copy="ytTitle">Copy</button></span></label>
       <input id="ytTitle">
-      <label class="lbl">Mô tả (mốc giờ + nguồn) <button class="mini" data-copy="ytDesc">Copy</button></label>
-      <textarea id="ytDesc" rows="8"></textarea>
+      <div class="titleOpts" id="titleOpts"></div>
+      <label class="lbl">Mô tả (lời dẫn + mốc giờ + nguồn) <button class="mini" data-copy="ytDesc">Copy</button></label>
+      <textarea id="ytDesc" rows="12"></textarea>
     </div>
     <hr>
     <button id="delBtn" class="danger">Xoá dự án</button>

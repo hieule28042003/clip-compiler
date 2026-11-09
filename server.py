@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from clipmaker import compose, moments
+from clipmaker import copywrite
 from clipmaker import youtube as yt
 
 ROOT = Path(__file__).resolve().parent
@@ -454,24 +455,23 @@ def build(pid: str):
             raise RuntimeError("Không tải được đoạn nào (YouTube chặn hoặc mất mạng)")
         if failed and p.get("countdown", True):     # đánh số lại cho liền mạch
             plan = [(c, len(plan) - k) for k, (c, _) in enumerate(plan)]
-        # phụ đề: lấy một lần mỗi video (lưu đệm)
+        # phụ đề: lấy một lần mỗi video (lưu đệm); luôn lấy vì lời dẫn mô tả trích câu thoại từ đây
         words = {}
-        if p.get("subtitles", True):
-            job["stage"] = "Đang lấy phụ đề"
-            sub_dir = f / "subs"
-            sub_dir.mkdir(exist_ok=True)
-            for vid in {c["vid"] for c, _ in plan}:
-                cache = sub_dir / f"{vid}.json"
-                url = p["videos"][vid].get("caption_url")
-                try:
-                    if not cache.exists() and url:
-                        cache.write_text(json.dumps(yt.captions(url)))
-                    words[vid] = json.loads(cache.read_text()) if cache.exists() else []
-                except Exception:
-                    words[vid] = []          # thiếu phụ đề một video không làm hỏng cả bản dựng
+        job["stage"] = "Đang lấy phụ đề"
+        sub_dir = f / "subs"
+        sub_dir.mkdir(exist_ok=True)
+        for vid in {c["vid"] for c, _ in plan}:
+            cache = sub_dir / f"{vid}.json"
+            url = p["videos"][vid].get("caption_url")
+            try:
+                if not cache.exists() and url:
+                    cache.write_text(json.dumps(yt.captions(url)))
+                words[vid] = json.loads(cache.read_text()) if cache.exists() else []
+            except Exception:
+                words[vid] = []          # thiếu phụ đề một video không làm hỏng cả bản dựng
         # 2. đưa từng đoạn về khung chuẩn + bình luận
         job["stage"] = "Đang dựng từng đoạn"
-        parts, chapters, t = [], [], 0.0
+        parts, chapters, copy_items, t = [], [], [], 0.0
         first_frame = seg_dir / "first.png"
         compose.run(["-ss", "1", "-i", str(raws[plan[0][0]["id"]]), "-frames:v", "1", "-update", "1", str(first_frame)])
         intro = compose.title_card(first_frame, p["title"], f"Top {len(plan)}", seg_dir / "intro.png")
@@ -486,11 +486,13 @@ def build(pid: str):
                                  v["title"] if p.get("credits", True) else "", c.get("caption", ""))
             ov_png = seg_dir / f"ov_{k}.png"
             ov.save(ov_png)
-            subs = yt.chunks(words.get(c["vid"], []), c["start"], c["end"])
+            subs = yt.chunks(words.get(c["vid"], []), c["start"], c["end"]) if p.get("subtitles", True) else []
             seg = compose.clip_segment(raws[c["id"]], seg_dir / f"{k + 1:03d}_clip.mp4", 0.0, c["end"] - c["start"],
                                        ov_png, seg_dir, subs)
             parts.append(seg)
             chapters.append((t, f"#{num} {v['title'][:60]}", c, v))
+            copy_items.append({"num": num, "ts": _ts(t), "line": copywrite.spoken_line(words.get(c["vid"], []), c),
+                               "comment": copywrite.clean_comment(c.get("comment", ""))})
             t += compose.probe(seg)["duration"]
             if c.get("voice") and (f / c["voice"]).exists():
                 frame = compose.last_frame(seg, seg_dir / f"last_{k}.png")
@@ -528,19 +530,27 @@ def build(pid: str):
         lines = [f"{_ts(x[0])} {x[1]}" for x in chapters]
         sources = sorted({(x[3]["title"], x[3]["channel"], x[2]["vid"]) for x in chapters[1:]})
         takes = sum(1 for c, _ in plan if c.get("voice"))
-        desc = (f"{p['title']} — {len(plan)} moments" + (" with my commentary" if takes else "") + ".\n\nTimestamps:\n"
-                + "\n".join(lines)
-                + "\n\nOriginal videos (all credit to the creators):\n"
-                + "\n".join(f"- {t_} — {ch} https://youtu.be/{vid}" for t_, ch, vid in sources)
-                + "\n\n#funnymoments #compilation")
+        copy_src = {"keyword": p["keyword"], "items": copy_items, "video_count": len(sources),
+                    "chapters_text": "\n".join(lines), "commentary": bool(takes),
+                    "sources": "\n".join(f"- {t_} — {ch} https://youtu.be/{vid}" for t_, ch, vid in sources)}
         cur = load(pid)
-        cur.update(output_stamp=_stamp(p), youtube={"title": f"{p['title']} | Top {len(plan)}"[:100],
-                                                    "description": desc}, failed=failed)
+        cur.update(output_stamp=_stamp(p), copy_src=copy_src, youtube=copywrite.make(**copy_src), failed=failed)
         save(cur)
         job["progress"] = 1.0
         return {"clips": len(plan), "failed": len(failed), "duration": round(t + OUTRO_LEN, 1)}
 
     return _start_job(pid, "build", work)
+
+
+@app.post("/api/projects/{pid}/copy")
+def rewrite_copy(pid: str):
+    """Viết lại tiêu đề + mô tả (mẫu câu khác, cùng dữ liệu của bản dựng gần nhất)."""
+    p = load(pid)
+    if not p.get("copy_src"):
+        raise HTTPException(400, "Dựng video trước rồi mới viết tiêu đề / mô tả")
+    p["youtube"] = copywrite.make(**p["copy_src"])
+    save(p)
+    return view(p)
 
 
 @app.post("/api/projects/{pid}/cancel")
