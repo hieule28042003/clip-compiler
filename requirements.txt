@@ -1,0 +1,10 @@
+fastapi>=0.162
+uvicorn[standard]>=0.54
+python-multipart>=0.0.33
+pillow>=13.0
+numpy>=2.5
+imageio-ffmpeg>=0.8.1
+yt-dlp[default]>=2026.10.26
+deno>=2.9
+pytest>=9.2
+httpx>=0.28

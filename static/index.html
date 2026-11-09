@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ghép Khoảnh Khắc Hay</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23171a22'/%3E%3Crect x='6' y='9' width='20' height='14' rx='3' fill='%23ffb02e'/%3E%3Cpath d='M14 13v6l5-3z' fill='%23171a22'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <a href="#" class="brand">🎞 Ghép Khoảnh Khắc Hay</a>
+  <span class="sub" id="crumb"></span>
+</header>
+
+<main id="home" class="page">
+  <section class="card">
+    <h2>Tạo video ghép mới</h2>
+    <p class="hint">App tìm video trên YouTube theo từ khoá, đọc biểu đồ <b>“Most replayed”</b> và các bình luận có mốc giờ
+      (“2:15 😂😂”) để tìm đoạn gây cười, rồi ghép thành video 10–20 phút có số thứ tự, ghi nguồn và phần bình luận của bạn.</p>
+    <label class="lbl">Từ khoá (nên dùng tiếng Anh để có nhiều video hơn)</label>
+    <input id="kw" placeholder="vd: celebrity funny moments, talk show bloopers, kevin hart funny">
+    <div class="three">
+      <div><span class="hint">Số video quét</span>
+        <select id="nVideos"><option value="20">20 video (~1 phút)</option><option value="40" selected>40 video (~2 phút)</option><option value="60">60 video (~3 phút)</option></select></div>
+      <div><span class="hint">Mỗi đoạn dài</span>
+        <select id="clipLen"><option value="6">6 giây</option><option value="8">8 giây</option><option value="10" selected>10 giây</option><option value="12">12 giây</option><option value="15">15 giây</option></select></div>
+      <div><span class="hint">Video dài khoảng</span>
+        <select id="minutes"><option value="10">10 phút</option><option value="15" selected>15 phút</option><option value="20">20 phút</option></select></div>
+    </div>
+    <label class="check"><input type="checkbox" id="useComments" checked> Đọc bình luận để tìm mốc gây cười (chính xác hơn, chậm hơn một chút)</label>
+    <button id="createBtn" class="primary big">🔎 Tìm khoảnh khắc</button>
+    <p class="err" id="createErr"></p>
+    <div class="warn">⚠ Các đoạn là video của người khác. Đăng lên YouTube có thể bị Content ID nhận ra (chặn tiếng, lấy doanh thu,
+      gậy bản quyền). Đoạn ngắn + bình luận của chính bạn sau mỗi đoạn giúp video mang tính <b>biến đổi</b> hơn, nhưng không đảm bảo an toàn.</div>
+  </section>
+  <section class="card">
+    <h2>Dự án đã tạo</h2>
+    <div id="projects" class="projects"><p class="hint">Chưa có dự án nào.</p></div>
+  </section>
+</main>
+
+<main id="editor" class="page hidden">
+  <section>
+    <div class="scanBox hidden" id="scanBox">
+      <p id="scanNote" class="note"></p>
+      <div class="progress" id="scanProg"><div></div></div>
+      <button id="scanCancel" class="mini">Huỷ</button>
+    </div>
+    <div class="listHead">
+      <h2>Danh sách dựng <span id="planInfo" class="hint"></span></h2>
+      <div class="row">
+        <span class="hint">Tự chọn đủ</span>
+        <select id="autoMin" style="width:auto"><option value="10">10 phút</option><option value="15">15 phút</option><option value="20">20 phút</option></select>
+        <button id="autoBtn" class="mini">Tự chọn lại</button>
+        <button id="moreBtn" class="mini">🔎 Quét thêm 20 video</button>
+      </div>
+    </div>
+    <p class="warn hidden" id="shortWarn"></p>
+    <p class="hint">Đoạn cuối là <b>#1</b> (hay nhất). Bấm ▶ để xem đúng đoạn, chỉnh ±1 giây, viết chú thích, và <b>🎙 thu bình luận</b> của bạn (phát sau đoạn đó trên khung hình dừng).</p>
+    <div id="plan" class="clips"></div>
+    <h2 class="mt">Ứng viên khác <span id="restInfo" class="hint"></span></h2>
+    <div id="rest" class="clips"></div>
+  </section>
+
+  <aside class="side">
+    <div class="player"><iframe id="yt" title="Xem trước" allow="autoplay; encrypted-media" allowfullscreen></iframe>
+      <div class="playerHint" id="playerHint">Bấm ▶ ở một đoạn để xem trước</div></div>
+    <p class="hint" id="nowPlaying"></p>
+    <label class="lbl">Tiêu đề video</label>
+    <input id="title">
+    <label class="check"><input type="checkbox" id="countdown"> Đánh số đếm ngược (… #3, #2, #1)</label>
+    <label class="check"><input type="checkbox" id="credits"> Hiện nguồn (tên kênh + tên video) trên từng đoạn</label>
+    <label class="check"><input type="checkbox" id="subtitles"> Phụ đề tiếng Anh trên từng đoạn (lấy từ phụ đề YouTube)</label>
+    <label class="lbl">Chữ to trên thumbnail <span class="hint">(ngắn, 2–5 chữ)</span></label>
+    <input id="thumbText" maxlength="60" placeholder="vd: TRY NOT TO LAUGH · HE SAID WHAT?!">
+    <div class="row">
+      <button id="buildBtn" class="primary big">🎬 Dựng video</button>
+      <button id="cancelBtn" class="hidden">Huỷ</button>
+    </div>
+    <div class="progress hidden" id="prog"><div></div></div>
+    <p class="note" id="buildNote"></p>
+    <div id="outBox" class="hidden">
+      <video id="outVideo" controls playsinline></video>
+      <label class="lbl">Chọn thumbnail <span class="hint">(bấm để tải)</span></label>
+      <div class="thumbs" id="thumbs"></div>
+      <div class="row">
+        <a id="dlVideo" class="link primary">⬇ Tải video</a>
+        <a class="link" href="https://studio.youtube.com" target="_blank" rel="noopener">YouTube Studio ↗</a>
+      </div>
+      <label class="lbl">Tiêu đề YouTube <button class="mini" data-copy="ytTitle">Copy</button></label>
+      <input id="ytTitle">
+      <label class="lbl">Mô tả (mốc giờ + nguồn) <button class="mini" data-copy="ytDesc">Copy</button></label>
+      <textarea id="ytDesc" rows="8"></textarea>
+    </div>
+    <hr>
+    <button id="delBtn" class="danger">Xoá dự án</button>
+  </aside>
+</main>
+
+<audio id="voicePlay"></audio>
+<script src="app.js"></script>
+</body>
+</html>
