@@ -175,3 +175,20 @@ def test_copy_quotes_the_moment():
     assert any("You're not my dad?" in t for t in out["titles"]) and all(len(t) <= 100 for t in out["titles"])
     assert "Moments Moments" not in " ".join(out["titles"]) and "#celebrity" in out["description"]
     assert copywrite.make("celebrity funny moments", items, 2, "", "", seed=2) != out     # viết lại ra bản khác
+
+
+def test_ffmpeg_copied_when_symlink_not_allowed(tmp_path, monkeypatch):
+    """Windows không có quyền Admin: symlink báo WinError 1314 -> phải chép file ffmpeg thay thế."""
+    import importlib
+    import pathlib
+
+    def deny(*a, **k):
+        raise OSError(1314, "A required privilege is not held by the client")
+
+    monkeypatch.setattr(pathlib.Path, "symlink_to", deny)
+    src = pathlib.Path(yt.__spec__.origin).read_text(encoding="utf-8")
+    ns = {"__file__": str(tmp_path / "clipmaker" / "youtube.py"), "__name__": "yt_copy"}
+    exec(compile(src, "youtube.py", "exec"), ns)
+    ff = pathlib.Path(ns["FFMPEG"])
+    assert ff.parent == tmp_path / "bin" and ff.is_file() and not ff.is_symlink()
+    assert compose.subprocess.run([str(ff), "-version"], capture_output=True).returncode == 0

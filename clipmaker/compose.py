@@ -23,13 +23,13 @@ def font(size, weight="Bold"):
 
 
 def run(args):
-    p = subprocess.run([FFMPEG, "-hide_banner", "-v", "error", "-y", *args], capture_output=True, text=True)
+    p = subprocess.run([FFMPEG, "-hide_banner", "-v", "error", "-y", *args], capture_output=True, text=True, encoding="utf-8", errors="replace")
     if p.returncode:
         raise RuntimeError("ffmpeg: " + p.stderr.strip()[-400:])
 
 
 def probe(path):
-    err = subprocess.run([FFMPEG, "-hide_banner", "-i", str(path)], capture_output=True, text=True).stderr
+    err = subprocess.run([FFMPEG, "-hide_banner", "-i", str(path)], capture_output=True, text=True, encoding="utf-8", errors="replace").stderr
     import re
 
     m = re.search(r"Duration: (\d+):(\d+):(\d+\.\d+)", err)
@@ -191,7 +191,7 @@ def title_card(bg_png, title, subtitle, out_png):
 
 def concat(parts, out, work):
     lst = Path(work) / "concat.txt"
-    lst.write_text("".join(f"file '{Path(p).resolve()}'\n" for p in parts))
+    lst.write_text("".join(f"file '{Path(p).resolve().as_posix()}'\n" for p in parts), encoding="utf-8")
     run(["-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", "-movflags", "+faststart", str(out)])
     return out
 

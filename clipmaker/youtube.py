@@ -9,13 +9,21 @@ from yt_dlp.utils import download_range_func
 ROOT = Path(__file__).resolve().parent.parent
 BIN = ROOT / "bin"
 # yt-dlp chỉ tìm ffmpeg trong PATH khi tải từng đoạn (bỏ qua ffmpeg_location) -> đưa bản ffmpeg của imageio vào PATH.
-if not (BIN / "ffmpeg").exists():
+# Windows: tạo symlink cần quyền Admin và PATH chỉ nhận tên .exe -> chép file thành bin/ffmpeg.exe.
+_FF = BIN / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+if not _FF.exists():
+    import shutil
+
     from imageio_ffmpeg import get_ffmpeg_exe
 
     BIN.mkdir(exist_ok=True)
-    (BIN / "ffmpeg").symlink_to(get_ffmpeg_exe())
+    _FF.unlink(missing_ok=True)            # symlink hỏng (venv tạo lại) vẫn chiếm tên
+    try:
+        _FF.symlink_to(get_ffmpeg_exe())
+    except OSError:
+        shutil.copy2(get_ffmpeg_exe(), _FF)
 os.environ["PATH"] = f"{BIN}{os.pathsep}{os.environ.get('PATH', '')}"
-FFMPEG = str(BIN / "ffmpeg")
+FFMPEG = str(_FF)
 MIN_LEN, MAX_LEN = 60, 3 * 3600          # bỏ Shorts (thường không có "Most replayed") và livestream dài
 
 

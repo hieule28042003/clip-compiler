@@ -13,6 +13,14 @@ git clone <link repo> clip-compiler && cd clip-compiler
 ./run.sh --update   # cập nhật yt-dlp khi YouTube đổi, tìm / tải video bị lỗi
 ```
 
+Windows (PowerShell / CMD, không cần quyền Admin):
+
+```bat
+setup.bat           & rem lần đầu
+run.bat             & rem chạy rồi mở http://127.0.0.1:8790  (run.bat 9000 để đổi cổng)
+run.bat --update    & rem cập nhật yt-dlp
+```
+
 Chạy test: `.venv/bin/python -m pytest -q`
 
 ## Cách tìm đoạn gây cười (`clipmaker/moments.py`)
