@@ -192,3 +192,26 @@ def test_ffmpeg_copied_when_symlink_not_allowed(tmp_path, monkeypatch):
     ff = pathlib.Path(ns["FFMPEG"])
     assert ff.parent == tmp_path / "bin" and ff.is_file() and not ff.is_symlink()
     assert compose.subprocess.run([str(ff), "-version"], capture_output=True).returncode == 0
+
+
+def test_download_falls_back_when_ffmpeg_cannot_connect(tmp_path, monkeypatch):
+    """ffmpeg không qua được proxy (Windows: 'exited with code 4294967158') -> tải cả video bằng Python rồi cắt."""
+    tries = []
+
+    def section_fails(*a):
+        tries.append(1)
+        raise RuntimeError("ERROR: ffmpeg exited with code 4294967158")
+
+    fetched = []
+
+    def fetch_full(vid, full, hook):
+        fetched.append(vid)
+        _fake_video(full, 20)
+        return True
+
+    monkeypatch.setattr(yt, "_download_section", section_fails)
+    monkeypatch.setattr(yt, "_fetch_full", fetch_full)
+    out = yt.download("abc", 5, 9, tmp_path / "a.mp4")
+    assert len(tries) == 2 and abs(compose.probe(out)["duration"] - 4) < 0.2
+    monkeypatch.setattr(yt, "_fetch_full", lambda vid, full, hook: full.exists())   # đoạn thứ 2 dùng lại file
+    assert abs(compose.probe(yt.download("abc", 10, 13, tmp_path / "b.mp4"))["duration"] - 3) < 0.2

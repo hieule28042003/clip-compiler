@@ -1,6 +1,9 @@
 """Tìm video, đọc dữ liệu "Most replayed" + bình luận có mốc giờ, tải đúng đoạn cần dùng (yt-dlp)."""
 import os
 import re
+import subprocess
+import threading
+import urllib.request
 from pathlib import Path
 
 import yt_dlp
@@ -29,6 +32,11 @@ MIN_LEN, MAX_LEN = 60, 3 * 3600          # bỏ Shorts (thường không có "Mo
 
 def _base_opts():
     opts = {"quiet": True, "no_warnings": True, "ffmpeg_location": str(BIN), "socket_timeout": 30}
+    # Python tự dùng proxy của hệ thống (Windows: cài đặt Proxy/VPN), còn ffmpeg thì không -> truyền rõ ràng,
+    # nếu không ffmpeg treo rồi báo "exited with code 4294967158" (= -138, hết thời gian chờ).
+    proxy = urllib.request.getproxies().get("https") or urllib.request.getproxies().get("http")
+    if proxy:
+        opts["proxy"] = proxy
     try:
         import deno      # YouTube cần bộ chạy JavaScript để lấy đủ định dạng video
 
@@ -140,25 +148,77 @@ def chunks(words, start, end, max_words=7, max_len=2.6):
     return [(round(a, 2), round(b, 2), txt) for a, b, txt in out if b - a > 0.2]
 
 
+def _newest(out_path):
+    got = sorted(out_path.parent.glob(out_path.stem + ".*"), key=lambda p: p.stat().st_mtime)
+    got = [p for p in got if p.suffix in (".mp4", ".mkv", ".webm") and p.stat().st_size > 0]
+    return got[-1] if got else None
+
+
+def _download_section(video_id, start, end, out_path, hook):
+    """Cách nhanh: ffmpeg tự lấy đúng đoạn từ máy chủ YouTube (không tải cả video)."""
+    opts = {**_base_opts(), "format": "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080][ext=mp4]/b[height<=1080]/b",
+            "download_ranges": download_range_func(None, [(float(start), float(end))]),
+            "force_keyframes_at_cuts": True, "outtmpl": str(out_path.with_suffix("")) + ".%(ext)s",
+            "merge_output_format": "mp4", "progress_hooks": [hook], "overwrites": True}
+    with yt_dlp.YoutubeDL(opts) as y:
+        y.download([f"https://www.youtube.com/watch?v={video_id}"])
+    return _newest(out_path)
+
+
+def _fetch_full(video_id, full, hook):
+    if full.exists():
+        return True
+    # hình + tiếng tải riêng bằng Python rồi ghép trên máy (ffmpeg chỉ đọc file, không cần mạng)
+    opts = {**_base_opts(), "format": "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
+            "outtmpl": str(full.with_suffix("")) + ".part.%(ext)s", "merge_output_format": "mp4",
+            "progress_hooks": [hook], "overwrites": True, "retries": 5, "fragment_retries": 5, "noprogress": True}
+    with yt_dlp.YoutubeDL(opts) as y:
+        y.download([f"https://www.youtube.com/watch?v={video_id}"])
+    done = full.with_suffix(".part.mp4")
+    if not done.exists():
+        return False
+    done.replace(full)
+    return True
+
+
+_full_locks, _full_guard = {}, threading.Lock()
+
+
+def _download_full_then_cut(video_id, start, end, out_path, hook):
+    """Dự phòng khi ffmpeg không kết nối được (proxy, mạng chặn): Python tải cả video 720p một lần
+    (giữ lại cho các đoạn khác cùng video) rồi cắt đoạn trên máy."""
+    full = out_path.parent / f"full_{video_id}.mp4"
+    with _full_guard:
+        lock = _full_locks.setdefault(video_id, threading.Lock())
+    with lock:                      # 2 đoạn cùng video chạy song song: chỉ tải cả video một lần
+        if not _fetch_full(video_id, full, hook):
+            return None
+    p = subprocess.run([FFMPEG, "-hide_banner", "-v", "error", "-y", "-ss", f"{start:.3f}", "-i", str(full),
+                        "-t", f"{end - start:.3f}", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                        "-c:a", "aac", "-b:a", "192k", str(out_path)],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if p.returncode != 0:
+        raise RuntimeError(f"ffmpeg cắt đoạn lỗi: {p.stderr[-300:]}")
+    return out_path
+
+
 def download(video_id, start, end, out_path, progress=lambda f: None):
-    """Tải riêng đoạn [start, end] (tối đa 1080p) ra MP4."""
+    """Tải riêng đoạn [start, end] ra MP4: thử cách nhanh 2 lần, hỏng thì tải cả video rồi cắt."""
     out_path = Path(out_path)
-    tmpl = str(out_path.with_suffix("")) + ".%(ext)s"
 
     def hook(d):
         if d.get("status") == "downloading" and d.get("total_bytes"):
             progress(d.get("downloaded_bytes", 0) / d["total_bytes"])
 
-    opts = {**_base_opts(), "format": "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080][ext=mp4]/b[height<=1080]/b",
-            "download_ranges": download_range_func(None, [(float(start), float(end))]),
-            "force_keyframes_at_cuts": True, "outtmpl": tmpl, "merge_output_format": "mp4",
-            "progress_hooks": [hook], "overwrites": True}
-    with yt_dlp.YoutubeDL(opts) as y:
-        y.download([f"https://www.youtube.com/watch?v={video_id}"])
-    got = sorted(out_path.parent.glob(out_path.stem + ".*"), key=lambda p: p.stat().st_mtime)
-    got = [p for p in got if p.suffix in (".mp4", ".mkv", ".webm")]
-    if not got:
-        raise RuntimeError(f"Không tải được đoạn video {video_id}")
-    if got[-1] != out_path:
-        got[-1].replace(out_path)
-    return out_path
+    errors = []
+    for way in (_download_section, _download_section, _download_full_then_cut):
+        try:
+            got = way(video_id, start, end, out_path, hook)
+        except Exception as e:  # noqa: BLE001 - lỗi mạng/yt-dlp đủ loại, thử cách sau
+            errors.append(str(e)[-200:])
+            continue
+        if got:
+            if got != out_path:
+                got.replace(out_path)
+            return out_path
+    raise RuntimeError(f"Không tải được đoạn video {video_id}: {errors[-1] if errors else ''}")
