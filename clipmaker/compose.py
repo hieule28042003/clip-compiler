@@ -83,11 +83,11 @@ def overlay(number=None, channel="", title="", caption=""):
 SUB_BOTTOM = 150            # px: phụ đề nằm trên hộp "Nguồn" ở góc dưới
 
 
-def subtitle_png(text, path):
+def subtitle_png(text, path, max_w=W * 0.72):
     """Một câu phụ đề: chữ trắng viền đen, nền tối mờ, tối đa 2 dòng (ảnh vừa khít, đặt giữa đáy khung)."""
     f = font(52)
     tmp = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
-    lines = _wrap(tmp, text, f, W * 0.72)[:2]
+    lines = _wrap(tmp, text, f, max_w)[:2]
     lw = max(tmp.textlength(l, font=f) for l in lines)
     img = Image.new("RGBA", (int(lw + 60), 72 * len(lines) + 24), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
@@ -193,6 +193,67 @@ def concat(parts, out, work):
     lst = Path(work) / "concat.txt"
     lst.write_text("".join(f"file '{Path(p).resolve().as_posix()}'\n" for p in parts), encoding="utf-8")
     run(["-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", "-movflags", "+faststart", str(out)])
+    return out
+
+
+# ---------- Shorts (dọc 1080x1920) ----------
+SW, SH = 1080, 1920
+SHORT_VIDEO_Y = 640          # video 16:9 rộng 1080 (cao ~608) đặt giữa; chữ hook phía trên, phụ đề phía dưới
+
+
+def short_overlay(hook, bottom, number=None):
+    img = Image.new("RGBA", (SW, SH), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    if hook:
+        size = 96
+        while size > 50:
+            f = font(size)
+            lines = _wrap(d, hook.upper(), f, SW * 0.88)
+            if len(lines) <= 3:
+                break
+            size -= 6
+        lines = lines[:3]
+        y = SHORT_VIDEO_Y - 50 - len(lines) * size * 1.08
+        for l in lines:
+            d.text((SW / 2, y), l, font=f, fill=(255, 255, 255), anchor="mt", stroke_width=8, stroke_fill=(0, 0, 0))
+            y += size * 1.08
+    if number is not None:
+        f = font(50)
+        label = f"#{number}"
+        w = d.textlength(label, font=f) + 40
+        d.rounded_rectangle([SW / 2 - w / 2, 150, SW / 2 + w / 2, 226], radius=18, fill=ACCENT + (240,))
+        d.text((SW / 2, 188), label, font=f, fill=(25, 18, 8), anchor="mm")
+    if bottom:
+        f = font(46, "SemiBold")
+        w = d.textlength(bottom, font=f) + 60
+        d.rounded_rectangle([SW / 2 - w / 2, SH - 430, SW / 2 + w / 2, SH - 350], radius=40, fill=(230, 30, 40, 235))
+        d.text((SW / 2, SH - 390), bottom, font=f, fill=(255, 255, 255), anchor="mm")
+    return img
+
+
+def short_segment(src, out, length, ov_png, work, subs=()):
+    """Một đoạn -> video dọc cho Shorts: nền mờ phủ kín, video giữa, hook phía trên, phụ đề ngay dưới video."""
+    info = probe(src)
+    length = min(length, info["duration"]) if info["duration"] else length
+    v = (f"[0:v]fps={FPS},split[a][b];[a]scale={SW}:{SH}:force_original_aspect_ratio=increase,crop={SW}:{SH},"
+         f"boxblur=30:2,eq=brightness=-0.18[bg];[b]scale={SW}:-2[fg];"
+         f"[bg][fg]overlay=0:{SHORT_VIDEO_Y}[v0];[v0][1:v]overlay=0:0[vs0]")
+    sub_inputs, last = [], "vs0"
+    sub_y = SHORT_VIDEO_Y + SW * 9 // 16 + 40
+    for i, (t0, t1, text) in enumerate(s for s in subs if s[0] < length):
+        png, _ = subtitle_png(text, Path(work) / f"{Path(out).stem}_sub{i}.png", max_w=SW * 0.8)
+        sub_inputs += ["-loop", "1", "-t", f"{length:.3f}", "-i", str(png)]
+        v += (f";[{last}][{2 + i}:v]overlay=(W-w)/2:{sub_y}:"
+              f"enable='between(t,{t0:.2f},{min(t1, length):.2f})'[vs{i + 1}]")
+        last = f"vs{i + 1}"
+    v += f";[{last}]format=yuv420p,setsar=1[v]"
+    if info["audio"]:
+        a, amap, extra = f";[0:a]loudnorm=I=-14:TP=-1.5:LRA=11,aresample={SR},aformat=channel_layouts=stereo[a]", "[a]", []
+    else:
+        a, amap = "", f"{2 + len(sub_inputs) // 6}:a"
+        extra = ["-f", "lavfi", "-t", f"{length:.3f}", "-i", f"anullsrc=r={SR}:cl=stereo"]
+    run(["-i", str(src), "-i", str(ov_png), *sub_inputs, *extra, "-filter_complex", v + a, "-map", "[v]",
+         "-map", amap, "-t", f"{length:.3f}", *VCODEC, *ACODEC, "-movflags", "+faststart", str(out)])
     return out
 
 

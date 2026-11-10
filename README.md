@@ -50,6 +50,13 @@ Mỗi đoạn có ô chú thích (chữ to trên đoạn) và nút **🎙 Thu b�
 dừng ("MY TAKE"). Phần bình luận làm video mang tính biến đổi hơn — nhưng **không đảm bảo** tránh được Content ID /
 khiếu nại bản quyền khi đăng YouTube. App không có và sẽ không có tính năng lách nhận diện bản quyền.
 
+## ⚡ Làm tự động, giọng đọc, Shorts
+- **⚡ Làm tự động** (form tạo video hoặc thẻ chủ đề ở trang Xu hướng): quét → chọn đủ thời lượng (tự quét thêm tối đa
+  2 lần) → lời bình giọng đọc → dựng → thumbnail, tiêu đề, mô tả, tag → Shorts. Vẫn mở dự án ra sửa và dựng lại được.
+- **🤖 Lời bình giọng đọc** (`clipmaker/voice.py`): câu bình ngắn cho các đoạn top, dựa trên bình luận nhiều like nhất /
+  câu thoại của chính đoạn đó, đọc bằng edge-tts (miễn phí, cần mạng). Bản thu tay của bạn luôn được giữ nguyên.
+- **✂ Shorts**: 3 đoạn top thành video dọc 1080x1920 có hook, phụ đề, nút “Full video on my channel”, kèm tiêu đề + mô tả.
+
 ## Cấu trúc
 
 - `clipmaker/youtube.py`: tìm video, đọc heatmap + bình luận, tải đúng đoạn (yt-dlp; `bin/ffmpeg` là ffmpeg của imageio).

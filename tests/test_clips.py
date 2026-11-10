@@ -1,10 +1,11 @@
+import subprocess
 import time
 
 import pytest
 from fastapi.testclient import TestClient
 
 import server
-from clipmaker import compose, copywrite, moments
+from clipmaker import compose, copywrite, moments, seo, voice
 from clipmaker import youtube as yt
 
 
@@ -30,6 +31,12 @@ def test_moments_follow_replays_and_funny_comments():
     com = next(c for c in found if abs(c["peak"] - 452) <= 4)
     assert com["end"] - com["start"] == 10 and com["start"] <= 450 + 1.5 <= com["end"]
     assert any("crying" in r for r in com["reasons"])
+
+
+RESEARCH = {"phrases": ["celeb funny moments", "celeb funny moments india", "celeb funny moments reaction"],
+            "trend": [(5_000_000, "Nobody Expected Michelle Obama To Be This Funny"),
+                      (3_000_000, "Nobody Didn't Expect Adam Sandler To Be This Funny"),
+                      (900_000, "Bill Hader's Most SAVAGE Moments")], "year": 2026}
 
 
 def _fake_video(path, seconds, size="640x360"):
@@ -82,6 +89,7 @@ def fake_youtube(monkeypatch, tmp_path):
     monkeypatch.setattr(yt, "analyze", analyze)
     monkeypatch.setattr(yt, "captions", lambda url: [(float(t), w) for t in range(0, 600) for w in ["ha"]])
     monkeypatch.setattr(yt, "download", download)
+    monkeypatch.setattr(seo, "research", lambda kw: RESEARCH)
     monkeypatch.setattr(server, "DATA", tmp_path / "data")
     (tmp_path / "data").mkdir()
     return downloads
@@ -129,13 +137,21 @@ def test_server_end_to_end(fake_youtube, tmp_path):
     desc = v["project"]["youtube"]["description"]
     assert "https://youtu.be/" in desc and "#3 Funny video" in desc and "0:00 Intro" in desc
     yt_copy = v["project"]["youtube"]
-    assert len(yt_copy["titles"]) >= 3 and yt_copy["title"] in yt_copy["titles"]
-    assert desc.startswith(yt_copy["hook"]) and "#1" in yt_copy["hook"]                 # lời dẫn nhử tới #1
+    texts = [t["text"] for t in yt_copy["titles"]]
+    assert len(texts) >= 3 and yt_copy["title"] in texts and "celeb funny" in yt_copy["tags"]
+    assert desc.startswith("Celeb Funny Moments") and yt_copy["hook"] in desc and "#1" in yt_copy["hook"]  # từ khoá trước, rồi lời dẫn
     again = c.post(f"/api/projects/{pid}/copy").json()["project"]["youtube"]
     assert "#3 Funny video" in again["description"]
     for i in (1, 2, 3):
         assert c.get(f"/api/projects/{pid}/files/thumb_{i}.jpg").headers["content-type"] == "image/jpeg"
     assert (tmp_path / "data" / pid / "subs").exists()
+    shorts = v["project"]["shorts_out"]                               # Shorts dọc từ các đoạn top
+    assert job["result"]["shorts"] == 3 and [x["num"] for x in shorts] == [1, 2, 3]
+    assert all(x["title"].endswith("#shorts") and "youtu.be/" in x["description"] for x in shorts)
+    sh = c.get(f"/api/projects/{pid}/files/short_1.mp4")
+    assert sh.status_code == 200
+    (tmp_path / "s1.mp4").write_bytes(sh.content)
+    assert "1080x1920" in subprocess.run([compose.FFMPEG, "-i", str(tmp_path / "s1.mp4")], capture_output=True, text=True).stderr
 
     # dựng lại: không tải lại các đoạn đã có
     n = len(fake_youtube)
@@ -172,8 +188,9 @@ def test_copy_quotes_the_moment():
              {"num": 1, "ts": "0:20", "line": "You're not my dad?", "comment": ""}]
     out = copywrite.make("celebrity funny moments", items, 2, "0:00 Intro", "- a", seed=1)
     assert "You're not my dad" in out["hook"] and "0:20" in out["hook"] and "the face he made" in out["hook"]
-    assert any("You're not my dad?" in t for t in out["titles"]) and all(len(t) <= 100 for t in out["titles"])
-    assert "Moments Moments" not in " ".join(out["titles"]) and "#celebrity" in out["description"]
+    texts = [t["text"] for t in out["titles"]]
+    assert any("You're not my dad?" in t for t in texts) and all(len(t) <= 100 for t in texts)
+    assert "Moments Moments" not in " ".join(texts) and "#CelebrityFunnyMoments" in out["description"]
     assert copywrite.make("celebrity funny moments", items, 2, "", "", seed=2) != out     # viết lại ra bản khác
 
 
@@ -215,3 +232,118 @@ def test_download_falls_back_when_ffmpeg_cannot_connect(tmp_path, monkeypatch):
     assert len(tries) == 2 and abs(compose.probe(out)["duration"] - 4) < 0.2
     monkeypatch.setattr(yt, "_fetch_full", lambda vid, full, hook: full.exists())   # đoạn thứ 2 dùng lại file
     assert abs(compose.probe(yt.download("abc", 10, 13, tmp_path / "b.mp4"))["duration"] - 3) < 0.2
+
+
+def test_seo_names_need_evidence():
+    titles = ["Celebrity Kids Saying WAY Too Much...", "Lee Mack's Joke Leaves John Cleese In Near Tears | The Graham Norton Show",
+              "Royal Affair Of Laughter - Saif Ali Khan", "Nobody Expected Michelle Obama To Be This Funny"]
+    found = seo.names(titles, tags=["john cleese", "michelle obama"], weights=[1.5] * 4)
+    assert "John Cleese" in found and "Michelle Obama" in found
+    assert not any(n in found for n in ("Saying WAY", "Saif Ali Khan", "Royal Affair", "Graham Norton Show"))
+
+
+def test_seo_titles_follow_trend_and_search():
+    assert seo.main_phrase("celebrity funny", ["celebrity funny", "celebrity funny moments"]) == "celebrity funny"
+    assert seo.relevant("celeb funny moments", RESEARCH["phrases"], "funniest celeb audience reactions ever") == \
+        ["celeb funny moments", "celeb funny moments reaction"]                        # bỏ "india"
+    items = [{"num": 1, "ts": "0:20", "line": "", "comment": ""}]
+    out = copywrite.make("celeb funny moments", items, 3, "", "", seed=4, research=RESEARCH, names=["Michelle Obama"],
+                         context="Michelle Obama reaction")
+    best = out["titles"][0]
+    assert "Michelle Obama" in best["text"] and best["score"] >= 8
+    assert any(t["text"].startswith("Nobody Expected Michelle Obama") for t in out["titles"])  # mẫu hot nhất tháng
+    assert out["description"].startswith("Celeb Funny Moments 😂 featuring Michelle Obama")
+    assert "india" not in out["description"] + out["tags"] and "michelle obama" in out["tags"]
+    assert len(out["tags"]) <= 500
+    ok = dict(seo.score_title("x" * 80, "celeb funny moments", [], [])[1])
+    assert not ok["Dài 40–70 ký tự (không bị cắt trên điện thoại)"]
+
+
+def _hot(i, title, views):
+    return {"id": f"hot{i:08d}", "title": title, "channel": "C", "views": views, "duration": 600}
+
+
+def test_trends_find_hot_topics_and_seed_project(fake_youtube, monkeypatch):
+    from clipmaker import trends
+
+    sugg = {"funny moments": ["funny moments", "funny moments roblox", "funny moments compilation"],
+            "funny moments i": ["funny moments ishowspeed"]}
+    monkeypatch.setattr(seo, "suggestions", lambda q: sugg.get(q, []))
+    hot = {
+        "funny moments roblox": [_hot(1, "Roblox Funny Moments 😂", 9_000_000), _hot(2, "Roblox Fails", 6_000_000)],
+        "funny moments ishowspeed": [_hot(3, "IShowSpeed Loses It With Michelle Obama", 5_000_000),
+                                     _hot(4, "Nobody Expected Michelle Obama To Be This Funny", 4_000_000),
+                                     _hot(5, "Michelle Obama Savage Moments", 3_000_000)],
+    }
+    monkeypatch.setattr(seo, "month_top", lambda kw, n=30: hot.get(kw, [_hot(9, "Funny Moments Compilation", 1000)]))
+    assert trends.expand("funny moments")[:3] == ["funny moments", "funny moments roblox", "funny moments compilation"]
+    c = TestClient(server.app)
+    assert c.post("/api/trends", json={"seed": " "}).status_code == 400
+    c.post("/api/trends", json={"seed": "funny moments", "depth": 6})
+    for _ in range(100):
+        r = c.get("/api/trends").json()
+        if r["job"]["done"]:
+            break
+        time.sleep(0.05)
+    assert r["job"]["error"] is None
+    res = r["result"]
+    names = [t["name"] for t in res["topics"]]
+    assert names[0] == "Roblox" and "IShowSpeed" in names and "Michelle Obama" in names
+    assert "Compilation" not in names                                        # chữ chung chung không phải chủ đề
+    obama = next(t for t in res["topics"] if t["name"] == "Michelle Obama")
+    assert obama["keyword"] == "Michelle Obama funny moments" and obama["count"] == 3
+    roblox = next(t for t in res["topics"] if t["name"] == "Roblox")
+    assert roblox["keyword"] == "funny moments roblox"                      # đúng cụm người xem gõ
+    assert res["keywords"][0]["heat"] == 100
+
+    # "Tạo video tương tự": quét các video đang hot trước
+    seen = []
+    real = yt.analyze
+
+    def analyze(vid, comments=120):
+        seen.append(vid)
+        return real(f"vid{len(seen) % 4}", comments) | {"id": vid}
+
+    monkeypatch.setattr(yt, "analyze", analyze)
+    seeds = [v["id"] for v in obama["videos"]] + ["bad id!"]
+    pid = c.post("/api/projects", json={"keyword": obama["keyword"], "videos": 4, "length": 4, "minutes": 1,
+                                         "seed_videos": seeds, "ref": "Michelle Obama"}).json()["project"]["id"]
+    _wait(c, pid)
+    p = c.get(f"/api/projects/{pid}").json()["project"]
+    assert seen[:3] == seeds[:3] and p["ref"] == "Michelle Obama" and "bad id!" not in p["seed_videos"]
+
+
+def test_auto_makes_everything_with_voiceover(fake_youtube, monkeypatch):
+    spoken = []
+
+    def speak(text, out, v=None):
+        spoken.append(text)
+        compose.run(["-f", "lavfi", "-i", "sine=frequency=600:duration=1.5", str(out)])
+        return out
+
+    monkeypatch.setattr(voice, "speak", speak)
+    c = TestClient(server.app)
+    pid = c.post("/api/projects", json={"keyword": "celeb funny", "videos": 4, "length": 4, "minutes": 1, "auto": True,
+                                        "voiceover": True, "takes": 2}).json()["project"]["id"]
+    job = _wait(c, pid)
+    assert job["kind"] == "auto" and job["error"] is None and job["result"]["shorts"] == 3, job["result"]
+    assert not job["result"]["note"], job["result"]["note"]
+    v = c.get(f"/api/projects/{pid}").json()
+    assert v["output"] and len(spoken) == 2 and len(set(spoken)) == 2
+    takes = {x["id"]: x for x in v["project"]["clips"] if x.get("voice_auto")}
+    nums = {x["id"]: x["number"] for x in v["plan"]}
+    assert sorted(nums[i] for i in takes) == [1, 2]
+    assert any("number one" in t["voice_text"].lower() for t in takes.values())
+    # tạo lại lời bình cho 1 đoạn: lời bình tự động của đoạn không còn trong top bị bỏ
+    c.post(f"/api/projects/{pid}/tts", json={"takes": 1})
+    assert _wait(c, pid)["result"]["takes"] == 1
+    clips = c.get(f"/api/projects/{pid}").json()["project"]["clips"]
+    assert [nums[x["id"]] for x in clips if x.get("voice_auto")] == [1]
+
+
+def test_voice_lines_use_comments_and_never_repeat():
+    items = [{"id": str(i), "num": i, "comment": "this guy is unbelievable 😂😂" if i == 2 else "", "line": ""}
+             for i in (3, 2, 1)]
+    out = voice.lines(items, seed=1)
+    assert "this guy is unbelievable" in out["2"] and "😂" not in out["2"]
+    assert len(set(out.values())) == 3 and ("number one" in out["1"].lower() or "not even close" in out["1"])

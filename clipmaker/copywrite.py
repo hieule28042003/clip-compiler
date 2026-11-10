@@ -1,11 +1,14 @@
-"""Tiêu đề + mô tả YouTube "câu view", không cần AI.
+"""Tiêu đề + mô tả + tag YouTube chuẩn SEO, theo xu hướng, không cần AI.
 
-Lời dẫn lấy từ chính video: câu thoại ngay trước đỉnh gây cười (phụ đề YouTube) và bình luận nhiều like nhất
-ở mốc đó. Ghép vào các mẫu câu có sẵn, chọn ngẫu nhiên nên mỗi lần bấm "Viết lại" ra một bộ khác.
+- Tiêu đề: tên người nổi tiếng + kiểu tiêu đề đang ăn khách tháng này + cụm từ người ta đang tìm (seo.py),
+  chấm điểm SEO từng tiêu đề.
+- Lời dẫn: câu thoại ngay trước đỉnh gây cười (phụ đề YouTube) / bình luận nhiều like nhất ở mốc đó.
+Chọn ngẫu nhiên có trọng số nên mỗi lần bấm "Viết lại" ra một bộ khác.
 """
 import random
 import re
 
+from . import seo
 from . import youtube as yt
 from .moments import LAUGH
 
@@ -58,20 +61,10 @@ def spoken_line(words, clip):
     return best[0].upper() + best[1:]
 
 
-# {T} chủ đề · {N} số đoạn · {Q} câu thoại/bình luận ngắn · {V} số video gốc
-TITLES = [
-    "{N} {T} Moments That Had Everyone Crying Laughing 😂",
-    "Try Not To Laugh: {T} Edition (#1 Is Unreal)",
-    "{T} Moments You Can't Unsee 😭 | Top {N}",
-    "Nobody Was Ready For #1 💀 | Top {N} {T} Moments",
-    "The Internet Can't Stop Replaying These {T} Moments",
-    "{T} Moments That Went Completely Off Script",
-    "{N} Times {T} Made The Whole Room Lose It",
-]
+# tiêu đề trích câu nói: tăng tò mò (CTR), vẫn kèm cụm từ khoá {P}
 QUOTE_TITLES = [
-    "\"{Q}\" 💀 | Top {N} {T} Moments",
-    "\"{Q}\" — {T} Moments That Broke Everyone",
-    "When They Said \"{Q}\"… 😭 | {T} Funny Moments",
+    "\"{Q}\" 💀 | {P}",
+    "When They Said \"{Q}\"… 😭 | {P}",
 ]
 OPENERS = [
     "It starts like any normal clip… then someone says “{L}” and nobody in the room can hold it together 😂",
@@ -119,10 +112,69 @@ def _fill(tpl, **kw):
     return re.sub(r"\s+", " ", tpl.format(**kw)).strip()
 
 
-def make(keyword, items, video_count, chapters_text, sources, commentary=False, seed=None):
-    """items: các đoạn theo thứ tự xuất hiện, mỗi phần tử {num, ts, line, comment}. Trả về tiêu đề + mô tả."""
+def _join(names):
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def _hashtag(text):
+    return "#" + "".join(w[:1].upper() + w[1:] for w in re.findall(r"\w+", text))
+
+
+def _titles(rnd, keyword, research, names, N, quote):
+    phrase = seo.main_phrase(keyword, research.get("phrases", []))
+    P = seo.title_case(phrase)
+    S = topic(phrase) or P              # chủ thể khi không có tên người: "Celebrity" (tránh "Moments Moments")
+    trend = research.get("trend", [])
+    pats = seo.trend_scores(trend)
+    hot = [x["person"] for x in pats if x["hits"]] + [x["topic"] for x in pats if x["hits"] and x["topic"]]
+    year = research.get("year")
+    use_year = year and sum(str(year) in t for _, t in trend) >= 2
+    cands = []                      # (tiêu đề, mẫu gốc)
+
+    def add(text, key):
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text) <= 100:
+            cands.append((text, key))
+
+    for x in pats:
+        forms = [(n, x["person"]) for n in names[:2]] + ([(S, x["topic"])] if x["topic"] else [])
+        for subj, tpl in forms:
+            base = tpl.format(X=subj, Xs=seo.possessive(subj), N=N)
+            if all(w in base.lower() for w in seo._words(phrase)):
+                add(base, x["person"])
+            else:
+                add(f"{base} | {P}", x["person"])
+                add(base, x["person"])
+            if use_year:
+                add(f"{base} ({year})", x["person"])
+    if quote:
+        add(rnd.choice(QUOTE_TITLES).format(Q=quote, P=P), "quote")
+    scored = []
+    for text, key in cands:
+        sc, checks = seo.score_title(text, phrase, names, hot)
+        trend_bonus = next((x["score"] for x in pats if x["person"] == key), 0)
+        scored.append((sc + min(trend_bonus, 30) / 30 + rnd.random() * 1.5, text, key, sc, checks))
+    scored.sort(reverse=True)
+    out, used = [], set()
+    for _, text, key, sc, checks in scored:            # mỗi kiểu tiêu đề một lần cho đa dạng
+        if key in used:
+            continue
+        used.add(key)
+        out.append({"text": text, "score": sc, "checks": checks})
+        if len(out) == 5:
+            break
+    return phrase, out
+
+
+def make(keyword, items, video_count, chapters_text, sources, commentary=False, seed=None,
+         research=None, names=(), source_tags=(), channels=(), context=""):
+    """items: các đoạn theo thứ tự xuất hiện, mỗi phần tử {num, ts, line, comment}.
+    research: kết quả seo.research(); names: tên người nổi tiếng trong các đoạn."""
     rnd = random.Random(seed)
-    T = topic(keyword) or "Funny"
+    research = dict(research or {})
+    names = list(names)
+    if context:            # chỉ dùng các gợi ý tìm kiếm mà video thật sự khớp
+        research["phrases"] = seo.relevant(keyword, research.get("phrases", []), context)
     N = len(items)
     top = min(items, key=lambda x: x["num"]) if items else {}
     # câu thoại chỉ dùng khi là câu hỏi / cảm thán trọn vẹn; còn lại bình luận người xem hấp dẫn hơn
@@ -133,22 +185,11 @@ def make(keyword, items, video_count, chapters_text, sources, commentary=False, 
     quote = ""
     for cand in [hero["line"] if hero else "", *(x["comment"] for x in comments)]:
         q = re.sub(r"[^\w\s'’!?,.-]", "", cand).strip(" ,.-")
-        if 2 <= len(q.split()) <= 7 and len(q) <= 42:
+        if 2 <= len(q.split()) <= 7 and len(q) <= 36:
             quote = q
             break
-
-    pool = [_fill(t, T=T, N=N) for t in TITLES]
-    if video_count >= 8:
-        pool.append(f"I Watched {video_count} Videos So You Don't Have To | {T} Funny Moments")
-    rnd.shuffle(pool)
-    if quote:
-        pool = [_fill(rnd.choice(QUOTE_TITLES), Q=quote, T=T, N=N)] + pool
-    titles = []
-    for t in pool:
-        t = re.sub(r"\b(\w+) Moments Moments\b", r"\1 Moments", t)[:100]
-        if t not in titles:
-            titles.append(t)
-    titles = titles[:5]
+    phrase, titles = _titles(rnd, keyword, research, names, N, quote)
+    P = seo.title_case(phrase)
 
     hook, about_top = [], False
     # bình luận hay nhất, thỉnh thoảng đổi sang cái tốt thứ hai để "Viết lại" có lời dẫn khác
@@ -168,13 +209,51 @@ def make(keyword, items, video_count, chapters_text, sources, commentary=False, 
         hook.append(_fill(rnd.choice(SAME_TEASERS if about_top else TEASERS), ts=top["ts"]))
     hook_text = "\n".join(hook)
 
-    tag = re.sub(r"[^\w]", "", T.lower())
-    tags = [f"#{tag}" if tag and tag != "funny" else "", "#funnymoments", "#trynottolaugh", "#compilation"]
-    desc = (hook_text
+    # 2 dòng đầu mô tả hiện ngay trong kết quả tìm kiếm: phải có cụm từ khoá + tên người
+    intro = f"{P} 😂" + (f" featuring {_join(names[:3])}" if names else "") + \
+        f" — {N} moments viewers replayed the most."
+    related = [x for x in research.get("phrases", []) if x != phrase][:3]
+    hashtags = [_hashtag(phrase), *(_hashtag(n) for n in names[:1]), "#FunnyMoments"]
+    desc = (intro + "\n\n" + hook_text
             + f"\n\n{N} moments the internet keeps replaying, picked from the “Most replayed” parts of {video_count} videos"
             + (" — with my commentary after the best ones." if commentary else ".")
+            + (f" If you were searching for {_join(related)}, you're in the right place." if related else "")
             + "\n\n" + rnd.choice(CTAS)
             + "\n\n⏱ Timestamps:\n" + chapters_text
             + "\n\n🎬 Original videos (all credit to the creators):\n" + sources
-            + "\n\n" + " ".join(t for t in tags if t))
-    return {"title": titles[0], "titles": titles, "hook": hook_text, "description": desc}
+            + "\n\n" + " ".join(dict.fromkeys(hashtags)))
+    tag_list = seo.tags(phrase, keyword, research.get("phrases", []), names, source_tags, channels)
+    hot = [x for x in seo.trend_scores(research.get("trend", [])) if x["hits"]]
+    return {"title": titles[0]["text"] if titles else P, "titles": titles, "hook": hook_text, "description": desc,
+            "tags": ", ".join(tag_list), "phrase": phrase, "searches": research.get("phrases", [])[:8],
+            "hot": [re.sub(r"\{\w+\}", "…", x["person"]) for x in sorted(hot, key=lambda x: -x["score"])[:4]],
+            "names": names}
+
+
+# ---------- Shorts ----------
+SHORT_HOOKS = ["Wait for it", "Nobody was ready for this", "This timing is unreal", "Watch their faces",
+               "I can't stop replaying this", "The way this ended"]
+
+
+def short_hook(item, rnd):
+    """Chữ to phía trên video dọc: câu thoại / bình luận ngắn của chính đoạn đó, không có thì câu nhử chung."""
+    # bình luận người xem trước: phụ đề tự động hay nghe nhầm chữ
+    for cand in (item.get("comment", ""), item.get("line") if item.get("line", "")[-1:] in "?!" else ""):
+        q = re.sub(r"[^\w\s'’!?,.-]", "", cand or "").strip(" ,.-")
+        if 2 <= len(q.split()) <= 8 and len(q) <= 44:
+            return f"\"{q}\""
+    return rnd.choice(SHORT_HOOKS)
+
+
+def shorts(items, main_title, names=()):
+    """items: [{num, hook, title, channel, vid}] -> tiêu đề + mô tả cho từng Short (kéo người xem về video dài)."""
+    out = []
+    for x in items:
+        tag = names[0] if names else ""
+        title = f"{x['hook'].strip(chr(34))} 😂" + (f" | {tag}" if tag and tag.lower() not in x["hook"].lower() else "")
+        desc = (f"#{x['num']} from my full video: {main_title}\n"
+                f"👉 Full compilation on my channel!\n\n"
+                f"🎬 Original: {x['title']} — {x['channel']} https://youtu.be/{x['vid']}\n\n"
+                + " ".join(dict.fromkeys(["#shorts", "#funny", "#funnymoments", *(_hashtag(n) for n in names[:1])])))
+        out.append({"title": title[:95] + " #shorts", "description": desc})
+    return out

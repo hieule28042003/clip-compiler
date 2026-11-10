@@ -94,7 +94,7 @@ def analyze(video_id, comments=120):
         "chapters": [{"start": c["start_time"], "end": c["end_time"], "title": c.get("title") or ""}
                      for c in info.get("chapters") or []],
         "marks": marks, "width": info.get("width"), "height": info.get("height"),
-        "caption_url": _caption_url(info),
+        "caption_url": _caption_url(info), "tags": [t for t in info.get("tags") or [] if len(t) <= 40][:30],
     }
 
 

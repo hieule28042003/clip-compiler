@@ -8,14 +8,27 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<header class="top">
-  <a href="#" class="brand">🎞 Ghép Khoảnh Khắc Hay</a>
-  <span class="sub" id="crumb"></span>
-</header>
+<div class="app">
+<aside class="sidebar">
+  <a href="#/" class="brand">🎞 <span>Ghép Khoảnh Khắc Hay</span></a>
+  <nav class="menu">
+    <a href="#/" data-nav="home"><i>➕</i><span>Tạo video ghép</span></a>
+    <a href="#/trends" data-nav="trends"><i>🔥</i><span>Xu hướng</span></a>
+    <a href="#/projects" data-nav="projects"><i>📁</i><span>Dự án</span></a>
+  </nav>
+  <div class="recent">
+    <p class="navHead">Gần đây</p>
+    <div id="recent"></div>
+  </div>
+</aside>
+
+<div class="content">
+<header class="top"><span class="sub" id="crumb"></span></header>
 
 <main id="home" class="page">
-  <section class="card">
+  <section class="card narrow">
     <h2>Tạo video ghép mới</h2>
+    <div class="seedNote hidden" id="seedNote"></div>
     <p class="hint">App tìm video trên YouTube theo từ khoá, đọc biểu đồ <b>“Most replayed”</b> và các bình luận có mốc giờ
       (“2:15 😂😂”) để tìm đoạn gây cười, rồi ghép thành video 10–20 phút có số thứ tự, ghi nguồn và phần bình luận của bạn.</p>
     <label class="lbl">Từ khoá (nên dùng tiếng Anh để có nhiều video hơn)</label>
@@ -29,15 +42,52 @@
         <select id="minutes"><option value="10">10 phút</option><option value="15" selected>15 phút</option><option value="20">20 phút</option></select></div>
     </div>
     <label class="check"><input type="checkbox" id="useComments" checked> Đọc bình luận để tìm mốc gây cười (chính xác hơn, chậm hơn một chút)</label>
-    <button id="createBtn" class="primary big">🔎 Tìm khoảnh khắc</button>
+    <label class="check"><input type="checkbox" id="voiceover" checked> 🎙 Lời bình bằng giọng đọc tự động cho 3 đoạn top
+      <select id="voice" class="inline"><option value="en-US-AndrewNeural">Andrew (nam, Mỹ)</option><option value="en-US-AvaNeural">Ava (nữ, Mỹ)</option><option value="en-US-BrianNeural">Brian (nam, Mỹ, trẻ)</option><option value="en-GB-RyanNeural">Ryan (nam, Anh)</option></select></label>
+    <label class="check"><input type="checkbox" id="shorts" checked> ✂ Cắt thêm 3 Shorts dọc từ các đoạn hay nhất</label>
+    <div class="row">
+      <button id="autoCreateBtn" class="primary big" title="Quét, chọn đoạn, lời bình, dựng video + Shorts — không cần duyệt">⚡ Làm tự động</button>
+      <button id="createBtn" class="big">🔎 Tìm khoảnh khắc &amp; tự duyệt</button>
+    </div>
+    <p class="hint">⚡ <b>Làm tự động</b>: bấm một lần, khoảng 10–25 phút sau có sẵn video, thumbnail, tiêu đề, mô tả, tag và Shorts.
+      Vẫn mở dự án ra chỉnh và dựng lại được.</p>
     <p class="err" id="createErr"></p>
     <div class="warn">⚠ Các đoạn là video của người khác. Đăng lên YouTube có thể bị Content ID nhận ra (chặn tiếng, lấy doanh thu,
       gậy bản quyền). Đoạn ngắn + bình luận của chính bạn sau mỗi đoạn giúp video mang tính <b>biến đổi</b> hơn, nhưng không đảm bảo an toàn.</div>
   </section>
+</main>
+
+<main id="projectsPage" class="page hidden">
   <section class="card">
     <h2>Dự án đã tạo</h2>
     <div id="projects" class="projects"><p class="hint">Chưa có dự án nào.</p></div>
   </section>
+</main>
+
+<main id="trends" class="page hidden">
+  <section class="card">
+    <h2>🔥 Nghiên cứu xu hướng</h2>
+    <p class="hint">Lấy từ khoá người xem đang gõ trên YouTube, đo độ hot bằng các video đăng <b>trong tháng này</b> có nhiều view nhất,
+      rồi tìm chủ đề / người nổi tiếng đang được xem nhiều. Bấm <b>“Tạo video tương tự”</b> để làm video tổng hợp về chủ đề đó
+      (app quét chính các video đang hot trước).</p>
+    <div class="trendForm">
+      <div><span class="hint">Lĩnh vực</span><input id="seed" value="funny moments" placeholder="vd: funny moments, celebrity funny moments"></div>
+      <div><span class="hint">Độ sâu</span>
+        <select id="depth"><option value="8">Nhanh · 8 từ khoá</option><option value="12" selected>Vừa · 12 từ khoá</option><option value="20">Kỹ · 20 từ khoá</option></select></div>
+      <button id="trendBtn" class="primary">🔥 Tìm chủ đề hot</button>
+    </div>
+    <div class="row" id="seedChips"></div>
+    <div class="progress hidden" id="trendProg"><div></div></div>
+    <p class="note" id="trendNote"></p>
+  </section>
+  <div id="trendOut" class="hidden">
+    <h2 class="mt">Chủ đề đang hot <span class="hint" id="trendAt"></span></h2>
+    <div id="topics" class="topics"></div>
+    <h2 class="mt">Từ khoá đang được tìm</h2>
+    <div class="card tableWrap"><table class="kwTable" id="kwTable"></table></div>
+    <h2 class="mt">Kiểu tiêu đề đang ăn khách</h2>
+    <div id="patterns" class="row"></div>
+  </div>
 </main>
 
 <main id="editor" class="page hidden">
@@ -72,6 +122,12 @@
     <label class="check"><input type="checkbox" id="countdown"> Đánh số đếm ngược (… #3, #2, #1)</label>
     <label class="check"><input type="checkbox" id="credits"> Hiện nguồn (tên kênh + tên video) trên từng đoạn</label>
     <label class="check"><input type="checkbox" id="subtitles"> Phụ đề tiếng Anh trên từng đoạn (lấy từ phụ đề YouTube)</label>
+    <label class="check"><input type="checkbox" id="shortsOpt"> ✂ Cắt 3 Shorts dọc khi dựng</label>
+    <div class="row ttsRow">
+      <select id="ttsVoice" title="Giọng đọc"><option value="en-US-AndrewNeural">Andrew (nam, Mỹ)</option><option value="en-US-AvaNeural">Ava (nữ, Mỹ)</option><option value="en-US-BrianNeural">Brian (nam, Mỹ, trẻ)</option><option value="en-GB-RyanNeural">Ryan (nam, Anh)</option></select>
+      <select id="ttsTakes" title="Số đoạn có lời bình"><option value="3">3 đoạn top</option><option value="5">5 đoạn top</option><option value="8">8 đoạn top</option></select>
+      <button id="ttsBtn" class="mini">🤖 Tạo lời bình giọng đọc</button>
+    </div>
     <label class="lbl">Chữ to trên thumbnail <span class="hint">(ngắn, 2–5 chữ)</span></label>
     <input id="thumbText" maxlength="60" placeholder="vd: TRY NOT TO LAUGH · HE SAID WHAT?!">
     <div class="row">
@@ -92,14 +148,25 @@
         <span><button class="mini" id="rewriteBtn" title="Mẫu câu khác">🎲 Viết lại</button>
         <button class="mini" data-copy="ytTitle">Copy</button></span></label>
       <input id="ytTitle">
+      <p class="hint" id="titleLen"></p>
       <div class="titleOpts" id="titleOpts"></div>
+      <div class="seoBox" id="seoBox"></div>
       <label class="lbl">Mô tả (lời dẫn + mốc giờ + nguồn) <button class="mini" data-copy="ytDesc">Copy</button></label>
       <textarea id="ytDesc" rows="12"></textarea>
+      <label class="lbl">Tag (dán vào ô “Thẻ” trên YouTube Studio) <button class="mini" data-copy="ytTags">Copy</button></label>
+      <textarea id="ytTags" rows="3"></textarea>
+      <div id="shortsBox" class="hidden">
+        <label class="lbl">✂ Shorts <span class="hint">(đăng cách nhau vài giờ để kéo người xem về video dài)</span></label>
+        <div id="shortsList" class="shorts"></div>
+      </div>
     </div>
     <hr>
     <button id="delBtn" class="danger">Xoá dự án</button>
   </aside>
 </main>
+
+</div>
+</div>
 
 <audio id="voicePlay"></audio>
 <script src="app.js"></script>
