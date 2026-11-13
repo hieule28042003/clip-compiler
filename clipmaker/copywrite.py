@@ -95,6 +95,35 @@ FALLBACK_OPENERS = [
     "We dug through the most replayed parts of {V} videos so you only get the moments people can't stop rewatching 😂",
     "Every clip here is a spot viewers literally rewound over and over. Try to make it to #1 without laughing.",
 ]
+# tiêu đề "giật tít": gây tò mò mạnh nhưng vẫn đúng nội dung (không hứa điều video không có)
+# bình luận đầu tiên của kênh dưới video: câu hỏi dễ trả lời để người xem bình luận (tương tác thật)
+ENGAGE = [
+    "Which one made you laugh the hardest? Drop the number 👇😂",
+    "Be honest: did #1 deserve the top spot? If not, which number should have won? 👇",
+    "{ts} got me every single time 💀 What was your favorite moment? 👇",
+    "Who should I make the next video about? The most liked suggestion gets picked 👇",
+]
+ENGAGE_PERSON = [
+    "What's the funniest {X} moment that I missed? Tell me and it might make the next video 👇",
+    "{X} at {ts} 💀 Which one was your favorite? Comment the number 👇",
+]
+
+BAIT_PERSON = [
+    "{X} Did WHAT?! 😳 {N} Moments Nobody Expected",
+    "Nobody Was Ready For What {X} Did Next 💀",
+    "{Xs} Most UNHINGED Moments Caught On Camera",
+    "The Moments {X} Went WAY Too Far 😂",
+    "{X} Moments You Won't Believe Actually Happened",
+]
+BAIT_TOPIC = [
+    "{S} Moments That Went WAY Too Far 😂",
+    "{S} Moments You Won't Believe Actually Happened",
+    "Nobody Was Ready For These {S} Moments 💀",
+]
+# chữ trên thumbnail: 2-4 chữ, đọc được trong 1 giây ở kích thước nhỏ
+PUNCH_PERSON = ["{X} DID WHAT?!", "{X} WENT TOO FAR", "{X} LOST IT", "WAIT… WHAT?!", "NOBODY WAS READY"]
+PUNCH_TOPIC = ["WAIT… WHAT?!", "NOBODY WAS READY", "THIS IS REAL?!", "WAY TOO FAR"]
+
 CTAS = [
     "👇 Which one got you? Comment the number!",
     "👇 Be honest — which number made you laugh first?",
@@ -149,19 +178,30 @@ def _titles(rnd, keyword, research, names, N, quote):
                 add(f"{base} ({year})", x["person"])
     if quote:
         add(rnd.choice(QUOTE_TITLES).format(Q=quote, P=P), "quote")
+    bait = [tpl.format(X=n, Xs=seo.possessive(n), N=N) for n in names[:1] for tpl in BAIT_PERSON] + \
+        [tpl.format(S=S) for tpl in BAIT_TOPIC]
+    for base in bait:
+        core = [w for w in seo._words(phrase) if not FILLER.fullmatch(w)]   # "trump funny moments" -> trump
+        has_kw = all(w in base.lower() for w in (core or seo._words(phrase)))
+        add(base if has_kw else f"{base} | {P}", "bait:" + base)
     scored = []
     for text, key in cands:
         sc, checks = seo.score_title(text, phrase, names, hot)
         trend_bonus = next((x["score"] for x in pats if x["person"] == key), 0)
         scored.append((sc + min(trend_bonus, 30) / 30 + rnd.random() * 1.5, text, key, sc, checks))
     scored.sort(reverse=True)
+    first = next((x for x in scored if x[2].startswith("bait:")), None)   # tiêu đề chính luôn là kiểu giật tít
+    if first:
+        scored.remove(first)
+        scored.insert(0, first)
     out, used = [], set()
     for _, text, key, sc, checks in scored:            # mỗi kiểu tiêu đề một lần cho đa dạng
-        if key in used:
+        kind = "bait" if key.startswith("bait:") else key
+        if key in used or (kind == "bait" and any(k.startswith("bait:") for k in used)):
             continue
         used.add(key)
         out.append({"text": text, "score": sc, "checks": checks})
-        if len(out) == 5:
+        if len(out) == 6:              # 1 tiêu đề giật tít + 5 kiểu theo xu hướng / trích câu
             break
     return phrase, out
 
@@ -224,7 +264,12 @@ def make(keyword, items, video_count, chapters_text, sources, commentary=False, 
             + "\n\n" + " ".join(dict.fromkeys(hashtags)))
     tag_list = seo.tags(phrase, keyword, research.get("phrases", []), names, source_tags, channels)
     hot = [x for x in seo.trend_scores(research.get("trend", [])) if x["hits"]]
-    return {"title": titles[0]["text"] if titles else P, "titles": titles, "hook": hook_text, "description": desc,
+    X = names[0].split()[-1] if names else ""
+    punch = rnd.choice(PUNCH_PERSON).format(X=X) if X else rnd.choice(PUNCH_TOPIC)
+    engage = [t for t in ENGAGE + (ENGAGE_PERSON if X else []) if top.get("ts") or "{ts}" not in t]
+    pin = rnd.choice(engage).format(X=names[0] if names else "", ts=top.get("ts", ""))
+    return {"title": titles[0]["text"] if titles else P, "titles": titles, "thumb": punch.upper(), "hook": hook_text, "description": desc,
+            "pin": pin,
             "tags": ", ".join(tag_list), "phrase": phrase, "searches": research.get("phrases", [])[:8],
             "hot": [re.sub(r"\{\w+\}", "…", x["person"]) for x in sorted(hot, key=lambda x: -x["score"])[:4]],
             "names": names}

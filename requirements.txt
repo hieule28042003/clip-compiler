@@ -9,3 +9,4 @@ edge-tts>=7.3
 deno>=2.9
 pytest>=9.2
 httpx>=0.28
+opencv-python-headless>=4.10,<5

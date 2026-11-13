@@ -30,8 +30,54 @@ FFMPEG = str(_FF)
 MIN_LEN, MAX_LEN = 60, 3 * 3600          # bỏ Shorts (thường không có "Most replayed") và livestream dài
 
 
+# cookie đăng nhập YouTube (giảm bị chặn "not a bot"): file cookies.txt hoặc đọc thẳng từ trình duyệt
+COOKIES = {"file": None, "browser": None}
+BROWSERS = ("firefox", "chrome", "edge", "brave", "chromium", "opera")
+LOGIN_COOKIES = {"LOGIN_INFO", "SID", "__Secure-1PSID", "__Secure-3PSID", "SAPISID"}
+
+
+def set_cookies(file=None, browser=None):
+    COOKIES.update(file=Path(file) if file else None, browser=browser if browser in BROWSERS else None)
+
+
+def check_cookie_file(text):
+    """Kiểm tra nội dung cookies.txt (định dạng Netscape) -> số cookie YouTube; lỗi nếu sai định dạng / chưa đăng nhập."""
+    names = set()
+    for line in text.splitlines():
+        if line.startswith("#HttpOnly_"):
+            line = line[len("#HttpOnly_"):]
+        if not line.strip() or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) != 7:
+            raise ValueError("File không đúng định dạng cookies.txt (Netscape). Hãy xuất bằng tiện ích “Get cookies.txt LOCALLY”.")
+        if parts[0].lstrip(".").endswith("youtube.com"):
+            names.add(parts[5])
+    if not names:
+        raise ValueError("File không có cookie của youtube.com — hãy mở youtube.com rồi mới xuất cookie.")
+    if not names & LOGIN_COOKIES:
+        raise ValueError("Cookie chưa đăng nhập — đăng nhập YouTube trong trình duyệt rồi xuất lại.")
+    return len(names)
+
+
+_cookie_copies = threading.local()
+
+
+def _cookie_opts():
+    if COOKIES["browser"]:
+        return {"cookiesfrombrowser": (COOKIES["browser"],)}
+    src = COOKIES["file"]
+    if not (src and src.exists()):
+        return {}
+    # yt-dlp ghi đè lại file cookie khi xong: mỗi luồng dùng bản sao riêng để các luồng không ghi chồng lên nhau
+    copy = src.with_name(f".{src.stem}_{threading.get_ident()}.txt")
+    if not copy.exists() or copy.stat().st_mtime < src.stat().st_mtime:
+        copy.write_bytes(src.read_bytes())
+    return {"cookiefile": str(copy)}
+
+
 def _base_opts():
-    opts = {"quiet": True, "no_warnings": True, "ffmpeg_location": str(BIN), "socket_timeout": 30}
+    opts = {"quiet": True, "no_warnings": True, "ffmpeg_location": str(BIN), "socket_timeout": 30, **_cookie_opts()}
     # Python tự dùng proxy của hệ thống (Windows: cài đặt Proxy/VPN), còn ffmpeg thì không -> truyền rõ ràng,
     # nếu không ffmpeg treo rồi báo "exited with code 4294967158" (= -138, hết thời gian chờ).
     proxy = urllib.request.getproxies().get("https") or urllib.request.getproxies().get("http")
@@ -71,6 +117,15 @@ def timestamps(text):
         if int(s) < 60:
             out.append(int(h or 0) * 3600 + int(m) * 60 + int(s))
     return out
+
+
+def check_access(video_id):
+    """Đọc thông tin + định dạng một video (giống lúc tải thật): lỗi nếu cookie hỏng / bị chặn."""
+    with yt_dlp.YoutubeDL({**_base_opts(), "skip_download": True}) as y:
+        info = y.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+    if not info.get("formats"):
+        raise RuntimeError("Không lấy được định dạng video")
+    return True
 
 
 def analyze(video_id, comments=120):
@@ -202,6 +257,16 @@ def _download_full_then_cut(video_id, start, end, out_path, hook):
     return out_path
 
 
+class Blocked(RuntimeError):
+    """YouTube tạm chặn IP vì tải quá nhiều ("Sign in to confirm you're not a bot" / HTTP 429): thử tiếp chỉ làm
+    chặn lâu hơn, nên dừng ngay."""
+
+
+def _blocked(msg):
+    m = msg.lower()
+    return "not a bot" in m or "http error 429" in m or "too many requests" in m
+
+
 def download(video_id, start, end, out_path, progress=lambda f: None):
     """Tải riêng đoạn [start, end] ra MP4: thử cách nhanh 2 lần, hỏng thì tải cả video rồi cắt."""
     out_path = Path(out_path)
@@ -215,6 +280,8 @@ def download(video_id, start, end, out_path, progress=lambda f: None):
         try:
             got = way(video_id, start, end, out_path, hook)
         except Exception as e:  # noqa: BLE001 - lỗi mạng/yt-dlp đủ loại, thử cách sau
+            if _blocked(str(e)):
+                raise Blocked(str(e)[-200:]) from None
             errors.append(str(e)[-200:])
             continue
         if got:

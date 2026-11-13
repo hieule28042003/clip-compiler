@@ -27,7 +27,7 @@ async function copyText(text, btn) {
 }
 
 // ---------- khung trang + sidebar ----------
-const PAGES = ["home", "projectsPage", "trends", "editor"];
+const PAGES = ["home", "projectsPage", "trends", "channels", "settings", "editor"];
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const views = (n) => n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}K` : `${n || 0}`;
 let SEED = null;              // ý tưởng mang từ trang Xu hướng sang: {keyword, videos, ref}
@@ -195,6 +195,232 @@ function renderTrends(res) {
   $("#patterns").innerHTML = res.patterns.map((p) => `<span class="chip">${esc(p.text)} <b>×${p.hits}</b></span>`).join("")
     || `<p class="hint">Không có kiểu nổi bật.</p>`;
 }
+
+// ---------- kênh YouTube ----------
+let CH = null, chTimer = null;
+const PRIV = { private: "🔒 Riêng tư", unlisted: "🔗 Không công khai", public: "🌍 Công khai" };
+const ST = { queued: "Đang chờ", running: "Đang chạy", done: "Đã đăng", error: "Lỗi", cancelled: "Đã huỷ" };
+const PHASE = { topic: "Chọn chủ đề", build: "Làm video", upload: "Tải lên" };
+
+async function showChannels() {
+  V = null;
+  showPage("channels", "channels", "Kênh YouTube");
+  loadProjects();
+  const q = new URLSearchParams(location.hash.split("?")[1] || "");
+  const note = $("#chNote");
+  if (q.get("ok")) { note.className = "note ok"; note.textContent = `Đã kết nối kênh “${q.get("ok")}”. Chỉnh chủ đề / loại video bên dưới rồi bấm ▶ Chạy.`; }
+  else if (q.get("err")) { note.className = "note bad"; note.textContent = "Kết nối không được: " + q.get("err"); }
+  else note.textContent = "";
+  if (q.toString()) history.replaceState(null, "", "#/channels");
+  renderChannels(await api("/api/channels"), true);
+  pollChannels();
+}
+
+function pollChannels() {
+  clearTimeout(chTimer);
+  chTimer = setTimeout(async () => {
+    if (!location.hash.startsWith("#/channels")) return;
+    const r = await api("/api/channels").catch(() => null);
+    if (r) renderChannels(r, false);
+    pollChannels();
+  }, 2000);
+}
+
+function renderChannels(r, full) {
+  CH = r;
+  $("#clientState").textContent = r.client.id && r.client.has_secret ? "✓ đã lưu" : "chưa nhập";
+  if (full) {
+    $("#clientId").value = r.client.id;
+    $("#clientSecret").placeholder = r.client.has_secret ? "•••••• (để trống = giữ nguyên)" : "GOCSPX-…";
+    $("#workers").value = String(r.workers);
+    $("#quotaLimit").value = r.quota.limit;
+    $("#guide").open = !(r.client.id && r.client.has_secret);
+  }
+  const q = r.quota, pct = Math.min(100, Math.round(q.used * 100 / q.limit));
+  $("#quotaBar").style.width = `${pct}%`;
+  $("#quotaText").textContent = `Hạn mức YouTube API hôm nay: ${q.used.toLocaleString("vi-VN")} / ${q.limit.toLocaleString("vi-VN")}`
+    + ` · còn đăng được khoảng ${Math.floor((q.limit - q.used) / 1650)} video`;
+  // danh sách kênh chỉ vẽ lại khi số kênh đổi / lần đầu (không làm mất chữ đang gõ)
+  const sig = r.accounts.map((a) => a.id).join();
+  if (full || $("#accList").dataset.sig !== sig) { $("#accList").dataset.sig = sig; renderAccounts(r); }
+  renderTasks(r.tasks);
+}
+
+const DAYS = ["T2", "T3", "T4", "T5", "T6", "T7", "CN"];
+const fmtAt = (ts) => new Date(ts * 1000).toLocaleString("vi-VN", { weekday: "short", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+
+function scheduleBox(a) {
+  const up = (a.upcoming || []).map((b) => `<li><b>${fmtAt(b.at)}</b> ${b.kind === "long" ? "🎬" : "✂"} `
+    + (b.url ? `<a href="${esc(b.url)}" target="_blank" rel="noopener">${esc(b.title || "video")}</a>` : `<span class="hint">đã giữ chỗ (đang làm)</span>`) + `</li>`).join("");
+  return `<div class="sched">
+    <div class="row"><b>📅 Lịch đăng</b><select data-f="schedule" style="width:auto">
+      <option value="now">Đăng ngay khi làm xong (theo “Chế độ đăng”)</option>
+      <option value="slots">⏰ Hẹn giờ lên sóng theo khung giờ</option></select></div>
+    ${a.schedule === "slots" ? `<div class="accGrid">
+      <div><span class="hint">Giờ lên sóng video dài</span><input data-f="slots_long" placeholder="19:00"></div>
+      <div><span class="hint">Giờ lên sóng Shorts</span><input data-f="slots_short" placeholder="12:00, 17:00, 21:00"></div>
+    </div>
+    <div class="row days">${DAYS.map((n, i) => `<label class="check"><input type="checkbox" data-day="${i}" ${(a.days || []).includes(i) ? "checked" : ""}> ${n}</label>`).join("")}</div>
+    <p class="hint">Video được dựng + tải lên trước ở chế độ Riêng tư, tới giờ YouTube tự chuyển sang <b>Công khai</b>
+      (bỏ qua “Chế độ đăng”). Mỗi video lấy mốc trống kế tiếp, không trùng nhau; Shorts lên sóng sau video dài.
+      Giờ theo đồng hồ máy này (${esc(Intl.DateTimeFormat().resolvedOptions().timeZone)}).</p>` : ""}
+    ${up ? `<p class="hint">Sắp lên sóng:</p><ul class="upcoming">${up}</ul>` : ""}
+  </div>`;
+}
+
+const STATS_OPEN = {};
+const num = (x) => x == null ? "–" : x.toLocaleString("vi-VN");
+const C_STATE = { pending: "⏳ chờ lên sóng", done: "✓ đã bình luận", off: "" };
+
+function growBox(a) {
+  return `<div class="sched">
+    <div class="row"><b>📈 Tương tác</b>
+      <label class="check"><input type="checkbox" data-f="comment"> 💬 Tự bình luận câu hỏi dưới video khi lên sóng</label></div>
+    <div class="row"><span class="hint">Thumbnail đăng lên</span><select data-f="thumb_style" style="width:auto">
+      <option value="rotate">🔁 Xoay vòng 3 mẫu (để so mẫu nào nhiều view)</option>
+      <option value="1">Sticker</option><option value="2">Reaction</option><option value="3">Split</option></select>
+      <button class="mini" data-act="stats">📊 Thống kê (${a.uploads || 0} video)</button></div>
+    <p class="hint">Bình luận do chính kênh đăng (câu hỏi kiểu “số mấy làm bạn cười nhất? 👇”; Shorts thì dẫn link video
+      dài). YouTube API không cho ghim: muốn ghim thì vào YouTube Studio → Bình luận → ⋮ → Ghim.</p>
+    <div class="statsBox" ${STATS_OPEN[a.id] ? "" : "hidden"}></div>
+  </div>`;
+}
+
+function renderStats(box, st) {
+  const ins = st.insights.map((g) => `<div class="ins"><b>${g.kind} · theo ${esc(g.by.toLowerCase())}</b>
+    ${g.sure ? "" : `<span class="hint"> (ít video, mới là gợi ý)</span>`}
+    <div class="tblWrap"><table><tr><th></th><th>Video</th><th>View TB</th><th>% xem hết</th><th>Sub</th></tr>
+    ${g.rows.map((r, i) => `<tr${i === 0 ? ' class="best"' : ""}><td>${i === 0 ? "🏆 " : ""}${esc(r.key)}</td><td>${r.n}</td>
+      <td>${num(r.views)}</td><td>${r.avg_pct == null ? "–" : r.avg_pct + "%"}</td><td>${num(r.subs)}</td></tr>`).join("")}</table></div></div>`).join("");
+  const vids = st.uploads.slice(0, 40).map((u) => {
+    const x = u.stats || {}, url = u.kind === "long" ? `https://youtu.be/${u.id}` : `https://youtube.com/shorts/${u.id}`;
+    const cs = u.c_state?.startsWith("error") ? `<span class="bad" title="${esc(u.c_state)}">✗ lỗi bình luận</span>` : C_STATE[u.c_state] || "";
+    return `<tr><td>${u.kind === "long" ? "🎬" : "✂"} <a href="${url}" target="_blank" rel="noopener">${esc(u.title)}</a>
+      <div class="hint">${fmtAt(u.at)}${u.thumb ? ` · ${esc(st.styles[u.thumb])}` : ""} ${cs}</div></td>
+      <td>${num(x.views)}</td><td>${num(x.likes)}</td><td>${num(x.comments)}</td><td>${x.avg_pct == null ? "–" : x.avg_pct + "%"}</td><td>${num(x.subs)}</td></tr>`;
+  }).join("");
+  box.innerHTML = `<div class="row"><button class="mini primary" data-act="statsRefresh">↻ Lấy số liệu mới</button>
+      <span class="hint">${st.updated ? `Cập nhật ${fmtAt(st.updated)}` : "Chưa lấy số liệu"} · số liệu YouTube trễ vài giờ tới 2–3 ngày</span></div>
+    ${st.note ? `<p class="hint">⚠ ${esc(st.note)}</p>` : ""}
+    ${ins || (st.uploads.length ? `<p class="hint">Cần thêm video (khác mẫu thumbnail / giờ / chủ đề) để so sánh.</p>` : "")}
+    ${vids ? `<div class="tblWrap"><table class="vids"><tr><th>Video</th><th>View</th><th>Like</th><th>BL</th><th>% xem</th><th>Sub</th></tr>${vids}</table></div>`
+      : `<p class="hint">Chưa có video nào do app đăng.</p>`}`;
+}
+
+async function loadStats(a, box, refresh) {
+  if (!refresh) box.innerHTML = `<p class="hint">Đang tải…</p>`;
+  try { renderStats(box, await api(`/api/channels/${a.id}/stats`, refresh ? { method: "POST" } : undefined)); }
+  catch (e) { if (refresh) alert(e.message); else box.innerHTML = `<p class="bad">${esc(e.message)}</p>`; return; }
+  const b = box.querySelector('[data-act="statsRefresh"]');
+  b.onclick = async () => { b.disabled = true; b.textContent = "Đang lấy…"; await loadStats(a, box, true); };
+}
+
+function renderAccounts(r) {
+  const box = $("#accList");
+  box.innerHTML = r.accounts.length ? "" : `<p class="hint">Chưa có kênh nào. Nhập Client ID ở bước 1 rồi bấm “+ Kết nối kênh”.</p>`;
+  const voices = Object.entries(r.voices).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join("");
+  for (const a of r.accounts) {
+    const d = document.createElement("div");
+    d.className = "acc" + (a.enabled ? "" : " off");
+    d.innerHTML = `<div class="accHead">${a.thumb ? `<img src="${esc(a.thumb)}" alt="">` : ""}<b>${esc(a.title)}</b>
+        <label class="check"><input type="checkbox" data-f="enabled"> Bật</label>
+        <div class="row"><select data-run style="width:auto"><option value="1">1 video</option><option value="2">2 video</option><option value="3">3 video</option></select>
+          <span class="hint">lên sóng lúc</span><input type="datetime-local" data-at title="Hẹn giờ lên sóng cụ thể cho video này (để trống = theo lịch đăng)" style="width:auto">
+          <button class="primary mini" data-act="run">▶ Chạy ngay</button>
+          <button class="mini" data-act="reconnect" title="Đăng nhập lại Google cho kênh này">Kết nối lại</button>
+          <button class="mini danger" data-act="del">Xoá</button></div></div>
+      <div><span class="hint">Chủ đề / lĩnh vực (mỗi dòng một cái)</span><textarea data-f="seeds" rows="2"></textarea></div>
+      <div class="accGrid">
+        <div><span class="hint">Cách chọn chủ đề</span><select data-f="mode">
+          <option value="hot">🔥 Lấy chủ đề đang hot trong lĩnh vực</option><option value="keywords">🔁 Dùng đúng từ khoá, xoay vòng</option></select></div>
+        <div><span class="hint">Video dài</span><select data-f="minutes"><option value="5">5 phút</option><option value="10">10 phút</option><option value="15">15 phút</option><option value="20">20 phút</option></select></div>
+        <div><span class="hint">Chế độ đăng</span><select data-f="privacy">${Object.entries(PRIV).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select></div>
+        <div><span class="hint">Giọng đọc</span><select data-f="voice">${voices}</select></div>
+        <div><span class="hint">Mỗi lần chạy</span><select data-f="per_run"><option value="1">1 video</option><option value="2">2 video</option><option value="3">3 video</option></select></div>
+        <div><span class="hint">Tự chạy mỗi ngày lúc</span><input type="time" data-f="daily"></div>
+      </div>
+      <div class="row">
+        <label class="check"><input type="checkbox" data-f="long"> 🎬 Đăng video dài</label>
+        <label class="check"><input type="checkbox" data-f="shorts"> ✂ Đăng 3 Shorts</label>
+        <label class="check"><input type="checkbox" data-f="voiceover"> 🤖 Lời bình giọng đọc</label>
+      </div>
+      ${scheduleBox(a)}
+      ${growBox(a)}
+      <p class="hint">${a.daily ? `⏰ Tự làm video lúc ${a.daily} mỗi ngày.` : ""} ${a.used?.length ? `Chủ đề gần đây: ${esc(a.used.slice(-3).map((u) => u.split("|").pop()).join(", "))}` : ""}</p>`;
+    for (const el of d.querySelectorAll("[data-f]")) {
+      const f = el.dataset.f, v = a[f];
+      if (el.type === "checkbox") el.checked = !!v;
+      else el.value = f === "seeds" ? (v || []).join("\n") : f.startsWith("slots_") ? (v || []).join(", ") : String(v ?? "");
+      el.onchange = async () => {
+        const val = el.type === "checkbox" ? el.checked : f === "seeds" ? el.value.split("\n")
+          : f.startsWith("slots_") ? el.value.split(/[,;\s]+/).filter(Boolean)
+          : ["minutes", "per_run"].includes(f) ? +el.value : el.value;
+        try { renderChannels(await api(`/api/channels/${a.id}`, json("PUT", { [f]: val })), true); }
+        catch (e) { alert(e.message); renderAccounts(CH); }
+      };
+    }
+    for (const el of d.querySelectorAll("[data-day]")) {
+      el.onchange = async () => {
+        const days = [...d.querySelectorAll("[data-day]")].filter((x) => x.checked).map((x) => +x.dataset.day);
+        try { renderChannels(await api(`/api/channels/${a.id}`, json("PUT", { days })), true); }
+        catch (e) { alert(e.message); renderAccounts(CH); }
+      };
+    }
+    d.querySelector('[data-act="run"]').onclick = async () => {
+      const at = d.querySelector("[data-at]").value;
+      try {
+        renderChannels(await api(`/api/channels/${a.id}/run`, json("POST", { count: +d.querySelector("[data-run]").value, publish_at: at || null })), true);
+      } catch (e) { alert(e.message); }
+    };
+    d.querySelector('[data-act="reconnect"]').onclick = connect;
+    const sb = d.querySelector(".statsBox");
+    d.querySelector('[data-act="stats"]').onclick = () => {
+      STATS_OPEN[a.id] = sb.hidden;
+      sb.hidden = !sb.hidden;
+      if (!sb.hidden) loadStats(a, sb, false);
+    };
+    if (STATS_OPEN[a.id]) loadStats(a, sb, false);
+    d.querySelector('[data-act="del"]').onclick = async () => {
+      if (!confirm(`Xoá kênh “${a.title}” khỏi app? (Không ảnh hưởng gì tới kênh trên YouTube)`)) return;
+      renderChannels(await api(`/api/channels/${a.id}`, { method: "DELETE" }), true);
+    };
+    box.appendChild(d);
+  }
+}
+
+function renderTasks(tasks) {
+  $("#taskList").innerHTML = tasks.length ? tasks.map((t) => {
+    const pct = Math.round((t.progress || 0) * 100);
+    return `<div class="task"><div><span class="st ${t.status}">${ST[t.status]}</span>
+        <b>${esc(t.channel)}</b>${t.keyword ? ` · ${esc(t.keyword)}` : ""}
+        <div class="hint">${t.status === "running" ? `${PHASE[t.phase] || ""}: ${esc(t.stage)} ${pct}%` : ""}${t.error ? `<span class="bad">${esc(t.error)}</span>` : ""}${t.warn ? ` ⚠ ${esc(t.warn)}` : ""}</div></div>
+      <div>${["queued", "running"].includes(t.status) ? `<button class="mini" data-cancel="${t.id}">Huỷ</button>` : ""}</div>
+      ${t.status === "running" ? `<div class="progress"><div style="width:${pct}%"></div></div>` : ""}
+      ${(t.plan || []).length ? `<div class="hint">⏰ Lên sóng: ${t.plan.map((x) => `${x.kind === "long" ? "🎬" : "✂"} ${fmtAt(x.at)}`).join(" · ")}</div>`
+        : t.publish_at ? `<div class="hint">⏰ Hẹn lên sóng ${fmtAt(t.publish_at)}</div>` : ""}
+      <div class="links">${t.project ? `<a href="#/p/${t.project}">📁 Dự án</a>` : ""}${t.video ? `<a href="${t.video}" target="_blank" rel="noopener">▶ Video</a>` : ""}${(t.shorts || []).map((u, i) => `<a href="${u}" target="_blank" rel="noopener">✂ Short ${i + 1}</a>`).join("")}</div></div>`;
+  }).join("") : `<p class="hint">Chưa có việc nào. Bấm “▶ Chạy ngay” ở một kênh.</p>`;
+  $$("#taskList [data-cancel]").forEach((b) => b.onclick = async () => renderChannels(await api(`/api/tasks/${b.dataset.cancel}/cancel`, { method: "POST" }), false));
+}
+
+async function connect() {
+  try { location.href = (await api("/api/channels/connect")).url; }
+  catch (e) { $("#chNote").className = "note bad"; $("#chNote").textContent = e.message; }
+}
+$("#connectBtn").onclick = connect;
+$("#clientSave").onclick = async () => {
+  try {
+    renderChannels(await api("/api/channels/settings", json("PUT", { client_id: $("#clientId").value, client_secret: $("#clientSecret").value })), true);
+    $("#clientSecret").value = "";
+    $("#chNote").className = "note ok"; $("#chNote").textContent = "Đã lưu. Bấm “+ Kết nối kênh” để đăng nhập kênh YouTube.";
+  } catch (e) { alert(e.message); }
+};
+$("#workers").onchange = async (e) => renderChannels(await api("/api/channels/settings", json("PUT", { workers: +e.target.value })), false);
+$("#runAll").onclick = async () => {
+  try { renderChannels(await api("/api/channels-run-all", { method: "POST" }), false); } catch (e) { alert(e.message); }
+};
+$("#quotaLimit").onchange = async (e) => renderChannels(await api("/api/channels/settings", json("PUT", { quota_limit: +e.target.value })), true);
+$("#clearTasks").onclick = async () => renderChannels(await api("/api/tasks", { method: "DELETE" }), false);
 
 // ---------- trang dự án ----------
 async function showEditor(id) {
@@ -465,10 +691,59 @@ function poll() {
   tick();
 }
 
+// ---------- cài đặt: cookie YouTube ----------
+const BROWSER_NAMES = { firefox: "Firefox", chrome: "Chrome", edge: "Edge", brave: "Brave", chromium: "Chromium", opera: "Opera" };
+
+function renderCookies(c, note = "", ok = true) {
+  const state = c.mode === "file" ? `✓ Đang dùng file cookies.txt${c.count ? ` (${c.count} cookie YouTube)` : ""}`
+    : c.mode === "browser" ? `✓ Đang dùng cookie của ${BROWSER_NAMES[c.browser] || c.browser}` : "Chưa bật cookie";
+  $("#ckState").textContent = state + (c.mode !== "none" ? (c.tested ? " · đã kiểm tra OK" : " · chưa kiểm tra") : "");
+  $("#ckState").className = "hint " + (c.mode !== "none" ? "okText" : "");
+  $("#ckFileInfo").textContent = c.file ? `Đã có file (cập nhật ${new Date(c.updated * 1000).toLocaleString("vi-VN")})` : "";
+  $("#ckBrowser").innerHTML = c.browsers.map((b) => `<option value="${b}" ${b === c.browser ? "selected" : ""}>${BROWSER_NAMES[b] || b}</option>`).join("");
+  $("#ckOff").disabled = c.mode === "none";
+  $("#ckDelete").disabled = !c.file;
+  $("#ckTest").disabled = c.mode === "none";
+  $("#ckNote").textContent = note;
+  $("#ckNote").className = "note " + (note ? (ok ? "ok" : "bad") : "");
+}
+
+async function cookieAction(fn, okMsg) {
+  try { renderCookies(await fn(), okMsg); }
+  catch (e) { renderCookies(await api("/api/settings/cookies"), e.message, false); }
+}
+
+async function showSettings() {
+  V = null;
+  showPage("settings", "settings", "Cài đặt");
+  renderCookies(await api("/api/settings/cookies"));
+}
+
+$("#ckFile").onchange = () => {
+  const f = $("#ckFile").files[0];
+  if (!f) return;
+  const fd = new FormData(); fd.append("file", f);
+  $("#ckFile").value = "";
+  cookieAction(() => api("/api/settings/cookies/file", { method: "POST", body: fd }),
+    "Đã lưu file cookie. Bấm “Kiểm tra cookie” để thử.");
+};
+$("#ckUseBrowser").onclick = () => cookieAction(() => api("/api/settings/cookies", json("PUT", { mode: "browser", browser: $("#ckBrowser").value })),
+  "Đã chọn trình duyệt. Bấm “Kiểm tra cookie” để thử.");
+$("#ckOff").onclick = () => cookieAction(() => api("/api/settings/cookies", json("PUT", { mode: "none" })), "Đã tắt cookie.");
+$("#ckDelete").onclick = () => confirm("Xoá file cookies.txt khỏi máy?")
+  && cookieAction(() => api("/api/settings/cookies", { method: "DELETE" }), "Đã xoá file cookie.");
+$("#ckTest").onclick = async () => {
+  $("#ckTest").disabled = true;
+  $("#ckNote").className = "note"; $("#ckNote").textContent = "Đang thử đọc một video bằng cookie…";
+  await cookieAction(() => api("/api/settings/cookies/test", { method: "POST" }), "✓ Cookie dùng được — app sẽ tải video bằng cookie này.");
+};
+
 function route() {
   const h = location.hash, m = h.match(/^#\/p\/(\w+)/);
   if (m) showEditor(m[1]).catch((e) => { alert(e.message); location.hash = ""; });
   else if (h.startsWith("#/trends")) showTrends();
+  else if (h.startsWith("#/channels")) showChannels();
+  else if (h.startsWith("#/settings")) showSettings();
   else if (h.startsWith("#/projects")) showProjects();
   else showHome();
 }

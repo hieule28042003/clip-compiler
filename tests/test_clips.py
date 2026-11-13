@@ -1,11 +1,12 @@
 import subprocess
+from pathlib import Path
 import time
 
 import pytest
 from fastapi.testclient import TestClient
 
 import server
-from clipmaker import compose, copywrite, moments, seo, voice
+from clipmaker import compose, copywrite, moments, seo, trends, voice
 from clipmaker import youtube as yt
 
 
@@ -347,3 +348,279 @@ def test_voice_lines_use_comments_and_never_repeat():
     out = voice.lines(items, seed=1)
     assert "this guy is unbelievable" in out["2"] and "😂" not in out["2"]
     assert len(set(out.values())) == 3 and ("number one" in out["1"].lower() or "not even close" in out["1"])
+
+
+def test_channels_queue_builds_and_uploads(fake_youtube, monkeypatch):
+    from clipmaker import ytapi
+    uploads, thumbs = [], []
+    monkeypatch.setattr(ytapi, "exchange", lambda cid, sec, code, redirect: {"access_token": "A", "refresh_token": "R"})
+    monkeypatch.setattr(ytapi, "channel", lambda tok: {"id": "UC1", "title": "My Funny Channel", "thumb": ""})
+    monkeypatch.setattr(ytapi, "refresh", lambda cid, sec, rt: {"access_token": "A2"})
+
+    def upload(tok, path, meta, progress=None, stop=None):
+        assert tok == "A2" and Path(path).exists() and len(meta["snippet"]["title"]) <= 100
+        uploads.append(meta)
+        return f"v{len(uploads)}"
+
+    monkeypatch.setattr(ytapi, "upload", upload)
+    monkeypatch.setattr(ytapi, "set_thumbnail", lambda tok, vid, jpg: thumbs.append(vid))
+    monkeypatch.setattr(voice, "speak", lambda text, out, v=None: compose.run(
+        ["-f", "lavfi", "-i", "sine=duration=1", str(out)]))
+    topics = {"seed": "celeb", "keywords": [], "patterns": [], "at": 0,
+              "topics": [{"name": "Kevin Hart", "keyword": "kevin hart funny moments", "videos": [{"id": "vid1"}]},
+                         {"name": "Roblox", "keyword": "funny moments roblox", "videos": [{"id": "vid2"}]}]}
+    monkeypatch.setattr(trends, "research", lambda seed, depth=10, job=None: topics)
+    c = TestClient(server.app)
+    assert c.get("/api/channels/connect").status_code == 400          # chưa có client id
+    c.put("/api/channels/settings", json={"client_id": "cid", "client_secret": "sec", "workers": 2,
+                                          "quota_limit": 12_000})
+    url = c.get("/api/channels/connect").json()["url"]
+    state = url.split("state=")[1].split("&")[0]
+    r = c.get(f"/?code=abc&state={state}", follow_redirects=False)
+    assert r.status_code in (302, 307) and "ok=" in r.headers["location"]
+    v = c.get("/api/channels").json()
+    assert [a["title"] for a in v["accounts"]] == ["My Funny Channel"] and "refresh" not in v["accounts"][0]
+    assert c.put("/api/channels/UC1", json={"long": False, "shorts": False}).status_code == 400
+    assert c.put("/api/channels/UC1", json={"daily": "25:00"}).status_code == 400
+    c.put("/api/channels/UC1", json={"seeds": ["celeb"], "minutes": 3, "privacy": "public"})
+    c.post("/api/channels/UC1/run", json={"count": 2})               # 2 video chạy song song
+    for _ in range(3000):
+        tasks = c.get("/api/channels").json()["tasks"]
+        if all(t["status"] in ("done", "error", "cancelled") for t in tasks):
+            break
+        time.sleep(0.1)
+    assert [t["status"] for t in tasks] == ["done", "done"], [t["error"] for t in tasks]
+    assert {t["keyword"] for t in tasks} == {"Kevin Hart", "Roblox"}           # hai luồng không trùng chủ đề
+    # hạn mức 12.000: đủ 2 video dài + 2 thumbnail + 5 Shorts; Short thứ 6 bỏ qua kèm cảnh báo, không báo lỗi
+    assert len(uploads) == 7 and len(thumbs) == 2
+    assert sum("Shorts chưa đăng" in t["warn"] for t in tasks) == 1
+    shorts = [m for m in uploads if "#shorts" in m["snippet"]["title"]]
+    assert len(shorts) == 5 and all("Full video: https://youtu.be/" in m["snippet"]["description"] for m in shorts)
+    assert sum("publishAt" in m["status"] for m in shorts) >= 3                 # Shorts sau được hẹn giờ
+    assert c.get("/api/channels").json()["quota"]["used"] == 7 * 1600 + 2 * 50
+    c.post("/api/channels/UC1/run", json={})                                   # hết hạn mức: báo ngay, không dựng
+    for _ in range(100):
+        t = c.get("/api/channels").json()["tasks"][0]
+        if t["status"] == "error":
+            break
+        time.sleep(0.1)
+    assert "hạn mức" in t["error"] and not t["project"]
+    assert c.get("/").status_code == 200 and "<html" in c.get("/").text
+
+
+def test_clickbait_title_and_short_thumb_text():
+    from clipmaker import copywrite
+
+    items = [{"num": n, "ts": f"0:{n}0", "line": "", "comment": ""} for n in (3, 2, 1)]
+    y = copywrite.make("trump funny moments", items, 3, "", "", seed=1, names=["Donald Trump"])
+    bait = [t.format(X="Donald Trump", Xs="Donald Trump's", N=3) for t in copywrite.BAIT_PERSON]
+    assert y["title"] in bait                              # tiêu đề chính luôn là kiểu giật tít, không lặp "| Trump …"
+    assert 2 <= len(y["thumb"].split()) <= 4 and y["thumb"].isupper()
+    assert len({t["text"] for t in y["titles"]}) == len(y["titles"])
+
+
+def test_thumbnail_prefers_main_subject_face(tmp_path):
+    from PIL import Image
+
+    from clipmaker import compose
+
+    shot = tmp_path / "s.png"
+    Image.new("RGB", (1920, 1080), (90, 120, 160)).save(shot)
+    paths = compose.thumbnails([{"img": shot, "face": (900, 200, 1100, 450), "act": None}], "TRUMP DID WHAT?!", 0,
+                               tmp_path)
+    assert [Image.open(p).size for p in paths] == [(1280, 720)] * 3
+
+
+def test_bot_block_is_not_retried(monkeypatch, tmp_path):
+    tries = []
+
+    def section_blocked(*a):
+        tries.append(1)
+        raise RuntimeError("ERROR: [youtube] x: Sign in to confirm you’re not a bot. Use --cookies-from-browser")
+
+    monkeypatch.setattr(yt, "_download_section", section_blocked)
+    with pytest.raises(yt.Blocked):
+        yt.download("abc", 5, 9, tmp_path / "a.mp4")
+    assert len(tries) == 1                                  # không thử lại khi đang bị chặn
+
+
+def test_bot_block_stops_build_instead_of_short_video(fake_youtube, monkeypatch):
+    """YouTube chặn ("not a bot") giữa chừng: dừng tải ngay, báo rõ, không ra video cụt; Dựng lại chỉ tải phần thiếu."""
+    c = TestClient(server.app)
+    pid = c.post("/api/projects", json={"keyword": "celeb funny", "videos": 4, "length": 4, "minutes": 1}).json()["project"]["id"]
+    assert _wait(c, pid)["error"] is None
+    ok_download = yt.download
+    calls = []
+
+    def flaky(vid, start, end, out, progress=None):
+        calls.append(vid)
+        if len(calls) > 2:
+            raise yt.Blocked("Sign in to confirm you're not a bot")
+        return ok_download(vid, start, end, out)
+
+    monkeypatch.setattr(yt, "download", flaky)
+    c.post(f"/api/projects/{pid}/build")
+    err = _wait(c, pid)["error"]
+    assert "tạm chặn" in err and "Dựng lại" in err
+    assert not (server.DATA / pid / "output.mp4").exists()
+    monkeypatch.setattr(yt, "download", ok_download)        # hết chặn: dựng lại thành công
+    c.post(f"/api/projects/{pid}/build")
+    assert _wait(c, pid)["error"] is None and (server.DATA / pid / "output.mp4").exists()
+
+
+def test_cookie_settings(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "COOKIE_FILE", tmp_path / "cookies.txt")
+    monkeypatch.setattr(server, "SETTINGS_FILE", tmp_path / "settings.json")
+    monkeypatch.setattr(server, "DATA", tmp_path)
+    c = TestClient(server.app)
+    assert c.get("/api/settings/cookies").json()["mode"] == "none"
+    assert c.post("/api/settings/cookies/test").status_code == 400
+    bad = c.post("/api/settings/cookies/file", files={"file": ("c.txt", b"hello", "text/plain")})
+    assert bad.status_code == 400 and "định dạng" in bad.json()["detail"]
+    logged_out = "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t1999999999\tVISITOR_INFO1_LIVE\tx\n"
+    r = c.post("/api/settings/cookies/file", files={"file": ("c.txt", logged_out.encode(), "text/plain")})
+    assert r.status_code == 400 and "chưa đăng nhập" in r.json()["detail"]
+    good = logged_out + "#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t1999999999\tLOGIN_INFO\tabc\n"
+    v = c.post("/api/settings/cookies/file", files={"file": ("c.txt", good.encode(), "text/plain")}).json()
+    assert v["mode"] == "file" and v["count"] == 2 and "cookiefile" in yt._base_opts()
+    copy = Path(yt._base_opts()["cookiefile"])
+    assert copy != tmp_path / "cookies.txt" and copy.read_text() == good       # mỗi luồng một bản sao
+    monkeypatch.setattr(yt, "check_access", lambda vid: True)
+    assert c.post("/api/settings/cookies/test").json()["tested"]
+    assert c.put("/api/settings/cookies", json={"mode": "browser", "browser": "netscape"}).status_code == 400
+    assert c.put("/api/settings/cookies", json={"mode": "browser", "browser": "firefox"}).json()["mode"] == "browser"
+    assert yt._base_opts()["cookiesfrombrowser"] == ("firefox",)
+    v = c.delete("/api/settings/cookies").json()
+    assert v["mode"] == "none" and not v["file"] and "cookiefile" not in yt._base_opts()
+
+
+def test_free_slots_follow_days_and_skip_taken():
+    from datetime import datetime
+
+    mon = datetime(2026, 11, 16, 8, 0).timestamp()                    # thứ Hai 16/11/2026 08:00
+    a = {"slots_long": ["19:00"], "slots_short": ["21:00", "12:00"], "days": [0, 2],     # T2, T4
+         "booked": [{"at": datetime(2026, 11, 16, 19, 0).timestamp()}]}
+    got = [datetime.fromtimestamp(x) for x in server._free_slots(a, "long", 2, mon)]
+    assert got == [datetime(2026, 11, 18, 19, 0), datetime(2026, 11, 23, 19, 0)]   # T2 19:00 đã có video
+    got = [datetime.fromtimestamp(x) for x in server._free_slots(a, "short", 3, mon)]
+    assert got == [datetime(2026, 11, 16, 12, 0), datetime(2026, 11, 16, 21, 0), datetime(2026, 11, 18, 12, 0)]
+
+
+def test_channel_schedule_publishes_at_slots(fake_youtube, monkeypatch):
+    from clipmaker import ytapi
+    uploads = []
+    monkeypatch.setattr(ytapi, "exchange", lambda cid, sec, code, redirect: {"access_token": "A", "refresh_token": "R"})
+    monkeypatch.setattr(ytapi, "channel", lambda tok: {"id": "UC1", "title": "Ch", "thumb": ""})
+    monkeypatch.setattr(ytapi, "refresh", lambda cid, sec, rt: {"access_token": "A2"})
+    monkeypatch.setattr(ytapi, "upload", lambda tok, path, meta, progress=None, stop=None:
+                        uploads.append(meta) or f"v{len(uploads)}")
+    monkeypatch.setattr(ytapi, "set_thumbnail", lambda tok, vid, jpg: None)
+    monkeypatch.setattr(voice, "speak", lambda text, out, v=None: compose.run(
+        ["-f", "lavfi", "-i", "sine=duration=1", str(out)]))
+    c = TestClient(server.app)
+    c.put("/api/channels/settings", json={"client_id": "cid", "client_secret": "sec"})
+    state = c.get("/api/channels/connect").json()["url"].split("state=")[1].split("&")[0]
+    c.get(f"/?code=abc&state={state}", follow_redirects=False)
+    assert c.put("/api/channels/UC1", json={"slots_long": ["7pm"]}).status_code == 400
+    assert c.put("/api/channels/UC1", json={"days": []}).status_code == 400
+    assert c.post("/api/channels/UC1/run", json={"publish_at": "2020-01-01T10:00"}).status_code == 400   # quá khứ
+    v = c.put("/api/channels/UC1", json={"seeds": ["celeb"], "mode": "keywords", "minutes": 3, "privacy": "public",
+                                         "schedule": "slots", "slots_long": ["9:30", "20:00"],
+                                         "slots_short": ["21:00", "12:00", "17:00"]}).json()
+    assert v["accounts"][0]["slots_long"] == ["09:30", "20:00"]
+    c.post("/api/channels/UC1/run", json={"count": 1})
+    for _ in range(3000):
+        t = c.get("/api/channels").json()["tasks"][0]
+        if t["status"] in ("done", "error"):
+            break
+        time.sleep(0.1)
+    assert t["status"] == "done", t["error"]
+    ats = [m["status"].get("publishAt") for m in uploads]
+    assert len(uploads) == 4 and all(ats) and all(m["status"]["privacyStatus"] == "private" for m in uploads)
+    ts = [datetime_utc(x) for x in ats]
+    assert ts[0] > time.time() + 15 * 60 and ts[1:] == sorted(ts[1:]) and ts[1] > ts[0]   # Shorts sau video dài
+    assert time.strftime("%H:%M", time.localtime(ts[0])) in ("09:30", "20:00")
+    assert {time.strftime("%H:%M", time.localtime(x)) for x in ts[1:]} <= {"12:00", "17:00", "21:00"}
+    acc = c.get("/api/channels").json()["accounts"][0]
+    assert [b["at"] for b in acc["upcoming"]] == ts and all(b["url"] for b in acc["upcoming"])
+    assert [x["at"] for x in t["plan"]] == ts
+
+
+def datetime_utc(s):
+    import calendar
+
+    return calendar.timegm(time.strptime(s, "%Y-%m-%dT%H:%M:%SZ"))
+
+
+def test_channel_comments_rotating_thumbs_and_stats(fake_youtube, monkeypatch):
+    from clipmaker import ytapi
+    uploads, thumbs, comments = [], [], []
+    monkeypatch.setattr(ytapi, "exchange", lambda cid, sec, code, redirect: {"access_token": "A", "refresh_token": "R"})
+    monkeypatch.setattr(ytapi, "channel", lambda tok: {"id": "UC1", "title": "Ch", "thumb": ""})
+    monkeypatch.setattr(ytapi, "refresh", lambda cid, sec, rt: {"access_token": "A2"})
+    monkeypatch.setattr(ytapi, "upload", lambda tok, path, meta, progress=None, stop=None:
+                        uploads.append(meta) or f"v{len(uploads)}")
+    monkeypatch.setattr(ytapi, "set_thumbnail", lambda tok, vid, jpg: thumbs.append((vid, jpg.name)))
+    monkeypatch.setattr(ytapi, "comment", lambda tok, vid, text: comments.append((vid, text)) or "c1")
+    monkeypatch.setattr(voice, "speak", lambda text, out, v=None: compose.run(
+        ["-f", "lavfi", "-i", "sine=duration=1", str(out)]))
+    c = TestClient(server.app)
+    c.put("/api/channels/settings", json={"client_id": "cid", "client_secret": "sec"})
+    state = c.get("/api/channels/connect").json()["url"].split("state=")[1].split("&")[0]
+    c.get(f"/?code=abc&state={state}", follow_redirects=False)
+    assert c.put("/api/channels/UC1", json={"thumb_style": "9"}).status_code == 400
+    c.put("/api/channels/settings", json={"quota_limit": 100_000})
+    assert c.post("/api/channels/UC1/stats").status_code == 400                # chưa có video
+    c.put("/api/channels/UC1", json={"seeds": ["celeb"], "mode": "keywords", "minutes": 3, "privacy": "public"})
+    for _ in range(2):
+        c.post("/api/channels/UC1/run", json={"count": 1})
+        for _ in range(3000):
+            t = c.get("/api/channels").json()["tasks"][0]
+            if t["status"] in ("done", "error"):
+                break
+            time.sleep(0.1)
+        assert t["status"] == "done", t["error"]
+    assert [x[1] for x in thumbs] == ["thumb_1.jpg", "thumb_2.jpg"]            # xoay vòng mẫu thumbnail
+    l1, l2 = [x[0] for x in thumbs]
+    acc = c.get("/api/channels").json()["accounts"][0]
+    assert acc["uploads"] == len(uploads) > 2 and acc["comment"] is True
+    with server.ACC_LOCK:                                                      # giả như đã tới giờ lên sóng
+        d = server._accounts()
+        ups = d["accounts"][0]["uploads"]
+        assert all(u["c_state"] == "pending" and u["comment"] for u in ups)
+        for u in ups:
+            u["c_due"] = 0
+        server._save_accounts(d)
+    server._post_comments()
+    assert len(comments) == len(uploads) and "👇" in comments[0][1]
+    assert any("Full video: https://youtu.be/v1" in text for vid, text in comments if vid == "v2")
+    assert {vid for vid, _ in comments} == {f"v{i + 1}" for i in range(len(uploads))}
+    ups = c.get("/api/channels/UC1/stats").json()["uploads"]
+    assert all(u["c_state"] == "done" for u in ups)
+
+    longs = {l1: 900, l2: 300}
+    monkeypatch.setattr(ytapi, "video_stats", lambda tok, ids: {
+        i: {"views": longs.get(i, 50), "likes": 1, "comments": 2} for i in ids})
+
+    def no_analytics(tok, ids, start, end):
+        raise ytapi.ApiError("YouTube API 403: YouTube Analytics API has not been used")
+    monkeypatch.setattr(ytapi, "analytics", no_analytics)
+    r = c.post("/api/channels/UC1/stats")
+    assert r.status_code == 200, r.text
+    st = r.json()
+    assert "YouTube Analytics API" in st["note"]
+    assert {u["id"]: u["stats"]["views"] for u in st["uploads"]}["v1"] == 900
+    by_thumb = next(g for g in st["insights"] if g["by"] == "Mẫu thumbnail")
+    assert [r["key"] for r in by_thumb["rows"]] == ["Sticker", "Reaction"] and not by_thumb["sure"]
+
+    monkeypatch.setattr(ytapi, "analytics", lambda tok, ids, start, end: {"v1": {"minutes": 10, "avg_pct": 55.0, "subs": 3}})
+    st = c.post("/api/channels/UC1/stats").json()
+    assert st["note"] == "" and next(u for u in st["uploads"] if u["id"] == "v1")["stats"]["subs"] == 3
+
+
+def test_engage_comment_text():
+    out = copywrite.make("trump funny moments", [{"num": 1, "ts": "3:20", "line": "", "comment": ""}], 3, "", "",
+                         names=["Donald Trump"], seed=1)
+    assert out["pin"] and "{" not in out["pin"] and "👇" in out["pin"]
+    out = copywrite.make("funny cats", [{"num": 1, "ts": "", "line": "", "comment": ""}], 3, "", "", seed=2)
+    assert "{" not in out["pin"] and "  " not in out["pin"]

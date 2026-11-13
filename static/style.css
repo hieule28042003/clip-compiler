@@ -160,3 +160,51 @@ select.inline { width: auto; display: inline-block; margin-left: 6px; padding: 4
 .short .row { gap: 4px; }
 .topic .row { gap: 8px; }
 .topic .row button { flex: 1; }
+
+/* ---------- kênh YouTube ---------- */
+.guide { margin: 8px 0; padding-left: 20px; color: var(--dim); font-size: 14px; }
+.guide li { margin: 4px 0; }
+.guide a, .warn a { color: var(--accent); }
+details summary { cursor: pointer; color: var(--accent); margin: 4px 0 8px; }
+.accList { display: grid; gap: 12px; }
+.acc { border: 1px solid var(--line); border-radius: 12px; padding: 14px; display: grid; gap: 10px; }
+.acc.off { opacity: .6; }
+.accHead { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.accHead img { width: 36px; height: 36px; border-radius: 50%; }
+.accHead b { font-size: 16px; }
+.accHead .row { margin-left: auto; }
+.accGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; }
+.accGrid label.check { margin: 0; }
+.quota { display: flex; align-items: center; gap: 10px; margin: 8px 0 12px; }
+.quota .heat { flex: 0 0 220px; }
+.taskList { display: grid; gap: 8px; }
+.task { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center; border: 1px solid var(--line);
+  border-radius: 10px; padding: 10px 12px; font-size: 14px; }
+.task .progress { grid-column: 1 / -1; margin: 0; }
+.task .links { grid-column: 1 / -1; display: flex; gap: 10px; flex-wrap: wrap; font-size: 13px; }
+.task .links a { color: var(--accent); }
+.st { font-size: 12px; padding: 2px 8px; border-radius: 99px; background: #2a2e3b; }
+.st.running { background: #2a2114; color: var(--accent); } .st.done { background: #10291f; color: var(--ok); }
+.st.error { background: #2d1416; color: var(--bad); }
+@media (max-width: 900px) { .quota .heat { flex-basis: 120px; } }
+.task .bad { color: var(--bad); }
+
+.okText { color: var(--ok); }
+#settings h3 { font-size: 15px; }
+#settings code { background: #0003; padding: 1px 5px; border-radius: 5px; }
+#settings .mt { margin-top: 22px; }
+.sched { margin-top: 10px; padding: 10px 12px; border: 1px dashed var(--line, #333a48); border-radius: 10px; }
+.sched .days { gap: 4px 12px; }
+.upcoming { margin: 4px 0 0; padding-left: 18px; font-size: 13px; }
+.upcoming li { margin: 2px 0; }
+.upcoming a { color: var(--accent); }
+.acc { min-width: 0; grid-template-columns: minmax(0, 1fr); } .acc select, .acc input, .acc textarea { max-width: 100%; min-width: 0; }
+.statsBox { margin-top: 8px; min-width: 0; }
+.statsBox table { border-collapse: collapse; font-size: 13px; width: 100%; }
+.statsBox th, .statsBox td { padding: 4px 6px; border-bottom: 1px solid var(--line, #333a48); text-align: right; white-space: nowrap; }
+.statsBox th:first-child, .statsBox td:first-child { text-align: left; white-space: normal; }
+.statsBox tr.best td { color: var(--accent); font-weight: 600; }
+.statsBox .ins { margin: 8px 0; }
+.statsBox .tblWrap { overflow-x: auto; max-width: 100%; }
+.statsBox .vids td:first-child { min-width: 180px; }
+.statsBox a { color: var(--accent); }

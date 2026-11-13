@@ -15,6 +15,8 @@
     <a href="#/" data-nav="home"><i>➕</i><span>Tạo video ghép</span></a>
     <a href="#/trends" data-nav="trends"><i>🔥</i><span>Xu hướng</span></a>
     <a href="#/projects" data-nav="projects"><i>📁</i><span>Dự án</span></a>
+    <a href="#/channels" data-nav="channels"><i>📺</i><span>Kênh YouTube</span></a>
+    <a href="#/settings" data-nav="settings"><i>⚙</i><span>Cài đặt</span></a>
   </nav>
   <div class="recent">
     <p class="navHead">Gần đây</p>
@@ -88,6 +90,98 @@
     <h2 class="mt">Kiểu tiêu đề đang ăn khách</h2>
     <div id="patterns" class="row"></div>
   </div>
+</main>
+
+<main id="channels" class="page hidden">
+  <section class="card">
+    <h2>📺 Kênh YouTube &amp; tự đăng</h2>
+    <p class="hint">Mỗi kênh có chủ đề và loại video riêng. App chạy nhiều luồng song song: chọn chủ đề hot → ⚡ làm tự động
+      (video + thumbnail + tiêu đề/mô tả/tag + Shorts) → tải lên kênh. Có thể đặt giờ tự chạy mỗi ngày (máy phải đang mở app).</p>
+    <p class="note" id="chNote"></p>
+  </section>
+
+  <section class="card">
+    <div class="listHead"><h2>1. Kết nối Google</h2><span class="hint" id="clientState"></span></div>
+    <details id="guide">
+      <summary>Hướng dẫn lấy Client ID (làm một lần, khoảng 5 phút)</summary>
+      <ol class="guide">
+        <li>Vào <a href="https://console.cloud.google.com/projectcreate" target="_blank" rel="noopener">Google Cloud Console</a>, tạo một dự án mới.</li>
+        <li>Mở <a href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank" rel="noopener">YouTube Data API v3</a> → <b>Enable</b>. Làm tương tự với
+          <a href="https://console.cloud.google.com/apis/library/youtubeanalytics.googleapis.com" target="_blank" rel="noopener">YouTube Analytics API</a>
+          (cho bảng 📊 Thống kê: thời gian xem, % xem hết, sub có thêm).</li>
+        <li><a href="https://console.cloud.google.com/auth/branding" target="_blank" rel="noopener">Google Auth Platform</a> → điền tên app + email → loại <b>External</b>.
+          Ở mục <b>Audience</b> bấm <b>Publish app</b> (để “In production”, nếu để “Testing” thì 7 ngày phải đăng nhập lại).</li>
+        <li><a href="https://console.cloud.google.com/auth/clients" target="_blank" rel="noopener">Clients</a> → <b>Create client</b> → loại <b>Desktop app</b> → copy <b>Client ID</b> và <b>Client secret</b> dán vào dưới.</li>
+        <li>Bấm <b>“+ Kết nối kênh”</b>, đăng nhập tài khoản Google của kênh. Gặp màn “Google chưa xác minh ứng dụng này” → <b>Nâng cao</b> → <b>Đi tới … (không an toàn)</b> (đây là app của chính bạn).</li>
+      </ol>
+      <div class="warn">⚠ Giới hạn của Google: mỗi dự án Google Cloud có <b>10.000 đơn vị/ngày</b>, tải 1 video tốn 1.600 → khoảng <b>6 video/ngày</b>
+        (tính cả Shorts) cho <b>tất cả</b> kênh dùng chung Client ID. Dự án chưa qua kiểm duyệt của Google thì video tải lên qua API
+        <b>bị khoá ở chế độ Riêng tư</b> — bạn vào YouTube Studio đổi sang Công khai, hoặc gửi
+        <a href="https://support.google.com/youtube/contact/yt_api_form" target="_blank" rel="noopener">yêu cầu kiểm duyệt</a> để bỏ khoá.</div>
+    </details>
+    <div class="three">
+      <div><span class="hint">Client ID</span><input id="clientId" placeholder="xxxx.apps.googleusercontent.com"></div>
+      <div><span class="hint">Client secret</span><input id="clientSecret" type="password" placeholder="GOCSPX-…"></div>
+      <div><span class="hint">&nbsp;</span><button id="clientSave" class="primary">Lưu</button></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="listHead"><h2>2. Kênh</h2>
+      <div class="row"><button id="connectBtn" class="primary">+ Kết nối kênh</button><button id="runAll">▶ Chạy tất cả kênh</button></div></div>
+    <div id="accList" class="accList"><p class="hint">Chưa có kênh nào.</p></div>
+  </section>
+
+  <section class="card">
+    <div class="listHead"><h2>3. Hàng chờ &amp; đang chạy</h2>
+      <div class="row"><span class="hint">Chạy song song</span>
+        <select id="workers" style="width:auto"><option value="1">1 luồng</option><option value="2">2 luồng</option><option value="3">3 luồng</option><option value="4">4 luồng</option></select>
+        <span class="hint">Hạn mức/ngày</span><input id="quotaLimit" type="number" min="1600" step="1000" style="width:110px" title="Mặc định 10.000. Đã xin Google tăng thì nhập số mới">
+        <button id="clearTasks" class="mini">Xoá việc đã xong</button></div></div>
+    <p class="hint">Mỗi luồng dùng khoảng 1–2 GB RAM khi dựng. Máy yếu nên để 1–2 luồng.</p>
+    <div class="quota"><div class="heat"><div id="quotaBar"></div></div><span class="hint" id="quotaText"></span></div>
+    <div id="taskList" class="taskList"></div>
+  </section>
+</main>
+
+<main id="settings" class="page hidden">
+  <section class="card">
+    <div class="listHead"><h2>🍪 Cookie YouTube</h2><span class="hint" id="ckState"></span></div>
+    <p class="hint">Tải nhiều video, YouTube dễ tạm chặn máy bạn (“Sign in to confirm you're not a bot”) và video ra bị thiếu đoạn.
+      Dùng cookie của một tài khoản YouTube đã đăng nhập thì ít bị chặn hơn nhiều.</p>
+    <div class="warn">⚠ Cookie = quyền đăng nhập tài khoản đó. <b>Dùng một tài khoản Google phụ</b> (không phải tài khoản kênh đăng video),
+      không gửi file cookie cho ai, không dán vào chat. File lưu ở <code>data/cookies.txt</code> trên máy bạn (không đưa lên git).</div>
+
+    <h3 class="mt">Cách 1 — Tải file cookies.txt lên <span class="hint">(khuyên dùng, chạy được mọi trình duyệt)</span></h3>
+    <details id="ckGuide" open>
+      <summary>Hướng dẫn lấy file cookies.txt (khoảng 3 phút)</summary>
+      <ol class="guide">
+        <li>Cài tiện ích <b>Get cookies.txt LOCALLY</b>:
+          <a href="https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc" target="_blank" rel="noopener">Chrome / Edge / Cốc Cốc</a> ·
+          <a href="https://addons.mozilla.org/firefox/addon/get-cookies-txt-locally/" target="_blank" rel="noopener">Firefox</a>.
+          Chọn đúng bản có chữ <b>LOCALLY</b> (bản “Get cookies.txt” không có chữ này từng bị gỡ vì gửi cookie ra ngoài).</li>
+        <li>Cho tiện ích chạy ở cửa sổ ẩn danh: vào <code>chrome://extensions</code> → tiện ích → <b>Chi tiết</b> → bật <b>Cho phép ở chế độ ẩn danh</b>
+          (Firefox: Tiện ích → <b>Chạy trong cửa sổ riêng tư</b> → Cho phép).</li>
+        <li>Mở <b>cửa sổ ẩn danh</b> (Ctrl+Shift+N), vào <a href="https://www.youtube.com" target="_blank" rel="noopener">youtube.com</a>,
+          <b>đăng nhập tài khoản phụ</b>, mở một video bất kỳ.</li>
+        <li>Bấm biểu tượng tiện ích 🧩 → <b>Get cookies.txt LOCALLY</b> → <b>Export</b> (định dạng Netscape) → được file <code>www.youtube.com_cookies.txt</code>.</li>
+        <li><b>Đóng ngay cửa sổ ẩn danh</b> (đừng bấm đăng xuất — đăng xuất làm cookie mất hiệu lực). YouTube đổi cookie liên tục ở tab đang mở,
+          đóng cửa sổ giúp file cookie dùng được lâu hơn.</li>
+        <li>Bấm <b>Chọn file</b> dưới đây → <b>Kiểm tra</b>. Khi app lại báo bị chặn / cookie hết hạn (thường sau vài tuần) thì làm lại từ bước 3.</li>
+      </ol>
+    </details>
+    <div class="row mt"><input id="ckFile" type="file" accept=".txt,text/plain" style="width:auto">
+      <span class="hint" id="ckFileInfo"></span></div>
+
+    <h3 class="mt">Cách 2 — Lấy thẳng từ trình duyệt trên máy này</h3>
+    <p class="hint">Trình duyệt phải đang đăng nhập YouTube. <b>Firefox</b> chạy tốt nhất; Chrome / Edge bản mới mã hoá cookie nên thường
+      không đọc được (khi đó dùng Cách 1). Trên Windows nên đóng hẳn trình duyệt trước khi bấm Kiểm tra.</p>
+    <div class="row"><select id="ckBrowser" style="width:auto"></select><button id="ckUseBrowser">Dùng trình duyệt này</button></div>
+
+    <div class="row mt"><button id="ckTest" class="primary">🔎 Kiểm tra cookie</button>
+      <button id="ckOff">Tắt cookie</button><button id="ckDelete" class="mini">Xoá file cookie</button></div>
+    <p class="note" id="ckNote"></p>
+  </section>
 </main>
 
 <main id="editor" class="page hidden">
