@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from clipmaker import compose, moments
-from clipmaker import copywrite, music, seo, stream, trends, voice, ytapi
+from clipmaker import copywrite, lyrics, music, seo, stream, trends, voice, ytapi
 from clipmaker import youtube as yt
 
 ROOT = Path(__file__).resolve().parent
@@ -1531,6 +1531,278 @@ def mix_delete(mid: str):
     shutil.rmtree(_mix_dir(mid))
     JOBS.pop(_mix_job(mid), None)
     return {"ok": True}
+
+
+# ---------- 🎤 video TikTok lời bài hát ----------
+TT_LENGTHS = (0, 15, 30, 45, 60)          # 0 = cả bài
+TT_BG = "aesthetic scenery"
+
+
+def _tt_dir(tid):
+    f = DATA / "tiktok" / tid
+    if not tid.isalnum() or not (f / "tt.json").exists():
+        raise HTTPException(404, "Không tìm thấy video TikTok này")
+    return f
+
+
+def _tt_load(tid):
+    return json.loads((_tt_dir(tid) / "tt.json").read_text(encoding="utf-8"))
+
+
+def _tt_save(t):
+    path = DATA / "tiktok" / t["id"] / "tt.json"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(t, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _tt_view(t):
+    job = JOBS.get("tt_" + t["id"])
+    return {**{k: v for k, v in t.items() if k not in ("lrc",)},
+            "output": (DATA / "tiktok" / t["id"] / "output.mp4").exists(),
+            "job": {k: v for k, v in job.items() if k != "stop"} if job else None}
+
+
+class TikTokReq(BaseModel):
+    song: str
+    length: int = 30
+    bg: str = ""
+
+
+@app.post("/api/tiktok")
+def tiktok_create(req: TikTokReq):
+    song = req.song.strip()
+    if not song:
+        raise HTTPException(400, "Nhập tên bài hát (Ca sĩ - Tên bài) hoặc link YouTube của bài")
+    if req.length not in TT_LENGTHS:
+        raise HTTPException(400, "Độ dài không hợp lệ")
+    tid = uuid.uuid4().hex[:12]
+    (DATA / "tiktok" / tid).mkdir(parents=True)
+    t = {"id": tid, "created": time.time(), "input": song[:200], "length": req.length,
+         "bg": req.bg.strip()[:80] or TT_BG, "offset": 0.0, "title": song[:80], "warn": "", "stamp": ""}
+    _tt_save(t)
+    _start_job("tt_" + tid, "build", lambda job: _tt_build(tid, job))
+    return _tt_view(t)
+
+
+@app.get("/api/tiktok")
+def tiktok_list():
+    root = DATA / "tiktok"
+    items = []
+    for f in root.glob("*/tt.json") if root.exists() else []:
+        try:
+            items.append(_tt_view(json.loads(f.read_text(encoding="utf-8"))))
+        except (OSError, ValueError):
+            continue
+    return sorted(items, key=lambda t: -t["created"])
+
+
+class TikTokEdit(BaseModel):
+    offset: float | None = None
+    caption: str | None = None
+
+
+@app.put("/api/tiktok/{tid}")
+def tiktok_update(tid: str, e: TikTokEdit):
+    t = _tt_load(tid)
+    if e.caption is not None:
+        t["caption"] = e.caption[:2200]
+    rebuild = e.offset is not None and round(e.offset, 2) != t.get("offset", 0)
+    if rebuild:
+        t["offset"] = max(-10.0, min(10.0, round(e.offset, 2)))
+    _tt_save(t)
+    if rebuild:
+        _start_job("tt_" + tid, "build", lambda job: _tt_build(tid, job))
+    return _tt_view(t)
+
+
+@app.post("/api/tiktok/{tid}/build")
+def tiktok_build(tid: str):
+    _tt_dir(tid)
+    _start_job("tt_" + tid, "build", lambda job: _tt_build(tid, job))
+    return _tt_view(_tt_load(tid))
+
+
+@app.post("/api/tiktok/{tid}/cancel")
+def tiktok_cancel(tid: str):
+    _tt_dir(tid)
+    return cancel("tt_" + tid)
+
+
+@app.get("/api/tiktok/{tid}/files/{name}")
+def tiktok_files(tid: str, name: str, download: bool = False):
+    if name != "output.mp4":
+        raise HTTPException(404)
+    path = _tt_dir(tid) / name
+    if not path.exists():
+        raise HTTPException(404)
+    if download:
+        nice = "".join(ch for ch in _tt_load(tid)["title"] if ch.isalnum() or ch in " -_").strip() or "tiktok"
+        return FileResponse(path, filename=f"{nice} lyrics.mp4")
+    return FileResponse(path)
+
+
+@app.delete("/api/tiktok/{tid}")
+def tiktok_delete(tid: str):
+    job = JOBS.get("tt_" + tid)
+    if job and not job["done"]:
+        raise HTTPException(409, "Video đang dựng, bấm Huỷ trước")
+    shutil.rmtree(_tt_dir(tid))
+    JOBS.pop("tt_" + tid, None)
+    return {"ok": True}
+
+
+def _tt_resolve(t, job):
+    """Tên bài -> lời có mốc thời gian + video YouTube có tiếng khớp đúng bản thu âm đó."""
+    job["stage"] = "Đang tìm lời bài hát"
+    src = None
+    if re.search(r"youtu\.?be|^[\w-]{11}$", t["input"]):
+        src = music.info(t["input"])
+        lyr = lyrics.find(src["artist"], src["song"], duration=src["duration"])
+    else:
+        artist, song = lyrics.split_query(t["input"])
+        lyr = lyrics.find(artist, song, "" if song and artist else t["input"])
+    warn = ""
+    if src and abs(src["duration"] - lyr["duration"]) <= lyrics.DUR_OK:
+        audio = src
+    else:
+        job["stage"] = "Đang tìm bản thu âm khớp lời"
+        cands = []
+        for q in (f"{lyr['artist']} {lyr['song']} official audio", f"{lyr['artist']} {lyr['song']} lyrics",
+                  f"{lyr['artist']} {lyr['song']}"):
+            cands += [v for v in yt.search(q, 10) if v["id"] not in {c["id"] for c in cands}]
+            audio = lyrics.pick_audio(cands, lyr["song"], lyr["duration"])
+            if audio:
+                break
+        if not audio:
+            if not src and not cands:
+                raise RuntimeError("Không tìm thấy bài này trên YouTube")
+            audio = src or min(cands, key=lambda v: abs((v.get("duration") or 0) - lyr["duration"]))
+            warn = ("Không tìm được bản thu âm dài đúng bằng bản có lời, nên lời có thể lệch vài giây. "
+                    "Xem thử rồi chỉnh ô “Lệch lời”.")
+    t.update(artist=lyr["artist"], song=lyr["song"], title=f"{lyr['artist']} - {lyr['song']}".strip(" -"),
+             lrc=lyr["lrc"], lrc_dur=lyr["duration"], audio_vid=audio["id"],
+             audio_dur=audio.get("duration") or lyr["duration"], warn=warn)
+
+
+def _tt_backgrounds(t, f, n, seg, job):
+    """n clip nền dài ~seg giây: các khoảnh khắc hay (được tua lại nhiều) của video tìm theo từ khoá nền."""
+    bg_dir = f / "bg"
+    have = sorted(bg_dir.glob("bg_*.mp4")) if bg_dir.exists() else []
+    if len(have) >= n:
+        return have
+    bg_dir.mkdir(exist_ok=True)
+    job["stage"] = f"Đang tìm clip nền “{t['bg']}”"
+    vids = [v for v in yt.search(t["bg"], 12) if 30 < (v.get("duration") or 0) < 4 * 3600][:8]
+    if not vids:
+        raise RuntimeError(f"Không tìm thấy video nào cho từ khoá nền “{t['bg']}”")
+    per = {}
+
+    def one(v):
+        if job["stop"]:
+            raise InterruptedError
+        try:
+            info = yt.analyze(v["id"], 0)
+        except yt.Blocked:
+            raise
+        except Exception:
+            info = {"duration": v["duration"], "heatmap": [], "chapters": [], "marks": []}
+        got = moments.find(info, seg, per_video=4) if info.get("heatmap") else []
+        if not got:                                  # không có "Most replayed": lấy rải đều khúc giữa video
+            d = info.get("duration") or v["duration"]
+            got = [{"start": d * k, "end": d * k + seg, "score": 0} for k in (0.3, 0.45, 0.6, 0.75)]
+        return v["id"], got
+
+    with ThreadPoolExecutor(WORKERS) as ex:
+        for vid, got in ex.map(one, vids):
+            per[vid] = sorted(got, key=lambda m: -m["score"])
+    picks, k = [], 0                                  # lần lượt từng video: cảnh liền nhau không cùng một video
+    while len(picks) < n and any(len(v) > k for v in per.values()):
+        picks += [(vid, ms[k]) for vid, ms in per.items() if len(ms) > k]
+        k += 1
+    picks = picks[:n]
+    random.shuffle(picks)
+    job["stage"] = "Đang tải clip nền"
+    out, done = [], [0]
+
+    def fetch(i_pick):
+        i, (vid, m) = i_pick
+        if job["stop"]:
+            raise InterruptedError
+        path = bg_dir / f"bg_{i:02d}.mp4"
+        tmp = bg_dir / f"tmp_{i:02d}.mp4"
+        yt.download(vid, m["start"], m["start"] + seg + 0.5, tmp, full=False)
+        tmp.replace(path)
+        done[0] += 1
+        job["progress"] = 0.35 + 0.4 * done[0] / len(picks)
+        return path
+
+    with ThreadPoolExecutor(WORKERS) as ex:
+        for fut in [ex.submit(fetch, x) for x in enumerate(picks)]:
+            try:
+                out.append(fut.result())
+            except InterruptedError:
+                raise
+            except Exception:
+                continue
+    if not out:
+        raise RuntimeError("Không tải được clip nền nào (YouTube chặn hoặc mất mạng). Thử lại sau ít phút.")
+    return out
+
+
+def _tt_build(tid, job):
+    f = _tt_dir(tid)
+    t = _tt_load(tid)
+    if not t.get("lrc"):
+        _tt_resolve(t, job)
+        _tt_save(t)
+    if job["stop"]:
+        raise InterruptedError
+    job["stage"], job["progress"] = "Đang tải bài hát", 0.1
+    cache = DATA / "music_cache"
+    cache.mkdir(exist_ok=True)
+    audio = music.download_audio(t["audio_vid"], cache / f"{t['audio_vid']}_raw.flac", trim=False)
+    dur = compose.probe(audio)["duration"] or t["audio_dur"]
+    ls = lyrics.lines(lyrics.parse_lrc(t["lrc"]), dur)
+    if "a" not in t:
+        job["stage"], job["progress"] = "Đang tìm đoạn điệp khúc", 0.25
+        anchor = ls[len(ls) // 3][0] if ls else 0.0
+        if t["length"]:
+            try:
+                peak = music.heat_peak(yt.analyze(t["audio_vid"], 0).get("heatmap"), dur)
+            except Exception:
+                peak = None
+            try:
+                anchor = music.chorus(audio, peak)[0]
+            except Exception:
+                anchor = peak or anchor
+        t["a"], t["b"] = lyrics.window(ls, anchor, t["length"], dur)
+        _tt_save(t)
+    a, b = t["a"], t["b"]
+    tl = lyrics.timeline(ls, a, b, t.get("offset", 0.0))
+    scenes_len = lyrics.chunks(lyrics.timeline(ls, a, b), b - a)      # đổi cảnh theo câu (không theo lệch lời)
+    clips = _tt_backgrounds(t, f, min(len(scenes_len), 14), lyrics.CHUNK_MAX, job)
+    if job["stop"]:
+        raise InterruptedError
+    job["stage"], job["progress"] = "Đang dựng video", 0.8
+    work = f / "work"
+    _fresh_dir(work)
+    scenes = [lyrics.scene(clips[i % len(clips)], work / f"scene_{i:03d}.mp4", d) for i, d in enumerate(scenes_len)]
+    if job["stop"]:
+        raise InterruptedError
+    head = f"{t['song']} · {t['artist']}" if t.get("artist") else t["song"]
+    cl = lyrics.cards(tl, b - a, head, work / "cards")
+    tmp = f / "output.tmp.mp4"
+    lyrics.render(scenes, cl, audio, a, b, tmp, work)
+    tmp.replace(f / "output.mp4")
+    shutil.rmtree(work, ignore_errors=True)
+    t = _tt_load(tid)
+    t["stamp"] = uuid.uuid4().hex[:8]
+    t["duration"] = round(b - a, 1)
+    if not t.get("caption"):
+        t["caption"] = lyrics.caption(t.get("artist", ""), t["song"], tl)
+    _tt_save(t)
+    return {"duration": t["duration"]}
 
 
 # ---------- kênh YouTube: cấu hình, hàng chờ nhiều luồng, tự đăng ----------

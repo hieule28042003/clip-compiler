@@ -15,6 +15,7 @@
     <a href="#/" data-nav="home"><i>➕</i><span>Tạo video ghép</span></a>
     <a href="#/shorts" data-nav="shorts"><i>✂</i><span>Làm Shorts</span></a>
     <a href="#/music" data-nav="music"><i>🎵</i><span>Ghép nhạc</span></a>
+    <a href="#/tiktok" data-nav="tiktok"><i>🎤</i><span>TikTok lời bài hát</span></a>
     <a href="#/trends" data-nav="trends"><i>🔥</i><span>Xu hướng</span></a>
     <a href="#/projects" data-nav="projects"><i>📁</i><span>Dự án</span></a>
     <a href="#/channels" data-nav="channels"><i>📺</i><span>Kênh YouTube</span></a>
@@ -308,6 +309,35 @@
   <section class="card narrow mt">
     <h2>Bản mix đã tạo</h2>
     <div id="mixes" class="projects"><p class="hint">Chưa có bản mix nào.</p></div>
+  </section>
+</main>
+
+<main id="tiktokPage" class="page hidden">
+  <section class="card narrow">
+    <h2>🎤 Video TikTok lời bài hát</h2>
+    <p class="hint">Bạn nhập tên bài, app tự làm video dọc 9:16: <b>lời hiện từng câu khớp đúng lúc hát</b>, nền là các
+      <b>clip hay</b> app tự tìm theo từ khoá nền (đổi cảnh đúng lúc sang câu mới), tiếng là bài hát. Lời lấy từ LRCLIB.
+      Tiếng lấy từ bản thu âm trên YouTube dài đúng bằng bản có lời, để lời không bị lệch.
+      Với video ngắn, app tự chọn đoạn điệp khúc (đoạn được tua lại nhiều nhất).</p>
+    <label class="lbl">Bài hát</label>
+    <input id="tSong" placeholder="Ca sĩ - Tên bài (vd: Sơn Tùng M-TP - Chúng Ta Của Hiện Tại) hoặc link YouTube của bài">
+    <div class="three">
+      <div><span class="hint">Độ dài</span>
+        <select id="tLen"><option value="15">15 giây</option><option value="30" selected>30 giây (điệp khúc)</option>
+          <option value="45">45 giây</option><option value="60">1 phút</option><option value="0">Cả bài</option></select></div>
+      <div class="span2"><span class="hint">Clip nền (từ khoá tìm trên YouTube)</span>
+        <input id="tBg" list="tBgList" value="aesthetic scenery">
+        <datalist id="tBgList"><option value="aesthetic scenery"><option value="city night drive"><option value="rain window aesthetic">
+          <option value="anime scenery"><option value="sunset beach"><option value="funny moments"><option value="cute cats"></datalist></div>
+    </div>
+    <div class="row mt"><button id="tMake" class="primary big">🎬 Làm video</button></div>
+    <p class="err" id="tErr"></p>
+    <div class="warn">⚠ Bài hát và clip nền có bản quyền. TikTok có thể <b>tắt tiếng</b> video nếu bài không có trong thư viện nhạc
+      của TikTok hoặc tài khoản là tài khoản doanh nghiệp. Clip nền nên dùng từ khoá phong cảnh / chung chung, tránh cắt nội dung chính của người khác.</div>
+  </section>
+  <section class="card narrow mt">
+    <h2>Video đã làm</h2>
+    <div id="tList" class="ttList"><p class="hint">Chưa có video nào.</p></div>
   </section>
 </main>
 

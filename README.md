@@ -125,6 +125,22 @@ Menu **🎵 Ghép nhạc** → chọn quốc gia, thể loại, số bài, kiể
 - ⚠ Bài hát thương mại gần như chắc chắn bị Content ID nhận ra: doanh thu thuộc về chủ bài hát, có thể bị chặn
   hoặc nhận gậy bản quyền. Có tuỳ chọn chỉ lấy nhạc không bản quyền.
 
+## 🎤 TikTok lời bài hát (`clipmaker/lyrics.py`)
+
+Nhập "Ca sĩ - Tên bài" hoặc link YouTube của bài, chọn độ dài (15 / 30 / 45 giây, 1 phút hoặc cả bài) và từ khoá cho clip nền.
+App làm video dọc 1080x1920:
+
+- **Lời**: lấy từ [LRCLIB](https://lrclib.net) (miễn phí, có mốc thời gian từng câu). App ưu tiên bản gốc, bỏ bản remix / sped up / paused nếu bạn không ghi.
+- **Tiếng**: lấy từ video YouTube **dài đúng bằng** bản có lời (thường là "Official Audio"). MV hay có đoạn mở đầu riêng làm lời lệch.
+  App giữ nguyên khoảng lặng đầu bài để mốc thời gian khớp. Không tìm được bản khớp thì app vẫn làm và báo "lời có thể lệch".
+- **Đoạn**: video ngắn bắt đầu ở câu hát gần đoạn điệp khúc (đoạn được tua lại nhiều nhất + to nhất), kết thúc ngay trước một câu mới.
+- **Nền**: các khoảnh khắc hay của video tìm theo từ khoá nền, cắt kín khung dọc, bỏ viền đen, tối nhẹ cho chữ dễ đọc.
+  Cảnh đổi ở đầu câu hát (mỗi cảnh 3,5–8 giây), cảnh liền nhau lấy từ video khác nhau.
+- **Chữ**: câu đang hát to giữa màn, câu sau nhỏ mờ bên dưới, tên bài phía trên; đoạn nhạc dạo hiện ♪.
+  Chữ Hàn / Nhật / Trung / Thái dùng font Noto.
+- Lời lệch thì nhập số giây ở ô **Lệch lời** rồi bấm Áp dụng: app dựng lại ngay, không tải lại gì.
+- App viết sẵn caption TikTok (tên bài, một câu hát, hashtag). Tải video về rồi đăng ở TikTok Studio.
+
 ## 🔥 Xu hướng & 📊 phân tích (`clipmaker/trends.py`)
 - Chọn lĩnh vực + **7 ngày qua / 30 ngày qua**: app lấy các từ khoá người xem đang gõ, các video đăng trong khoảng đó
   nhiều view nhất (cả Shorts), rồi phân tích:
@@ -171,5 +187,6 @@ Menu **🎵 Ghép nhạc** → chọn quốc gia, thể loại, số bài, kiể
 - `clipmaker/moments.py`: chấm điểm từng giây, chọn đoạn.
 - `clipmaker/compose.py`: đưa đoạn về 1920x1080/30fps, chuẩn âm lượng, số thứ tự, nguồn, chú thích, khung bình luận, nối.
 - `clipmaker/stream.py`: chấm điểm từng giây của stream (chat phát lại, độ to, Most replayed, bình luận) → đoạn hay.
+- `clipmaker/lyrics.py`: lời có mốc thời gian (LRCLIB), chọn bản thu âm khớp lời, chọn đoạn, vẽ chữ, dựng video TikTok lời bài hát.
 - `clipmaker/music.py`: tìm bài hot, tải tiếng, nối crossfade, vẽ khung danh sách bài + sóng nhạc, dựng video ghép nhạc.
 - `server.py`, `static/`: web. Đoạn đã tải lưu ở `data/<dự án>/raw/` nên dựng lại không phải tải lại.

@@ -248,3 +248,20 @@ details summary { cursor: pointer; color: var(--accent); margin: 4px 0 8px; }
   .track img { width: 84px; }
   .track .ctl { grid-column: 2 / -1; }
 }
+
+/* ---------- TikTok lời bài hát ---------- */
+.span2 { grid-column: span 2; }
+.ttList { display: grid; gap: 12px; }
+.tt { display: grid; grid-template-columns: 200px 1fr; gap: 14px; border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+.tt video { width: 100%; aspect-ratio: 9 / 16; background: #000; border-radius: 10px; }
+.tt .ph { aspect-ratio: 9 / 16; border-radius: 10px; background: #000; display: grid; place-items: center; color: var(--dim); font-size: 13px; text-align: center; padding: 10px; }
+.tt .info { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.tt textarea { min-height: 110px; }
+.tt .offset { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.tt .offset input { width: 80px; }
+@media (max-width: 700px) {
+  .tt { grid-template-columns: 1fr; }
+  .tt video, .tt .ph { max-width: 260px; margin: 0 auto; }
+  #tiktokPage .three { grid-template-columns: 1fr; }
+  .three .span2 { grid-column: auto; }
+}

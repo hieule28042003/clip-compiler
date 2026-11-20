@@ -1120,3 +1120,65 @@ def test_long_video_from_several_streams(fake_youtube, monkeypatch):
     assert "bro what was that" in desc                                  # chương ghi câu chat + mốc giờ
     many = ["https://youtu.be/aaaaaaaaa%02d" % i for i in range(11)]
     assert c.post("/api/projects", json={"keyword": "s", "streams": many, "length": 30}).status_code == 400
+
+
+def test_lyrics_parse_window_and_audio_pick():
+    from clipmaker import lyrics
+    lrc = "[offset:+500]\n[00:10.00]Line one\n[00:14.00][01:00.00]Chorus here\n[00:18.00]\n[00:30.00]Line <00:31.00>three"
+    p = lyrics.parse_lrc(lrc)
+    assert p[0] == (9.5, "Line one") and (59.5, "Chorus here") in p and (29.5, "Line three") in p
+    ls = lyrics.lines(p, 80)
+    assert (13.5, 17.5, "Chorus here") in ls and all(t1 - t0 <= lyrics.LINE_MAX for t0, t1, _ in ls)
+    a, b = lyrics.window(ls, 13, 15, 80)
+    assert a == 13.2 and 25 <= b <= 30
+    assert lyrics.timeline(ls, a, b, 0)[0][2] == "Chorus here"
+    assert lyrics.split_query("Sơn Tùng M-TP - Chúng Ta Của Hiện Tại") == ("Sơn Tùng M-TP", "Chúng Ta Của Hiện Tại")
+    cands = [{"id": "mv", "title": "Song X (Official MV)", "duration": 260, "views": 9e8},
+             {"id": "rmx", "title": "Song X Remix", "duration": 231, "views": 5e7},
+             {"id": "aud", "title": "Song X | Official Audio", "duration": 230, "views": 1e6}]
+    assert lyrics.pick_audio(cands, "Song X", 229.5)["id"] == "aud"
+    assert lyrics.pick_audio(cands, "Song X", 100) is None
+    assert sum(lyrics.chunks([(0, 3, "a"), (4, 9, "b"), (9.5, 30, "c")], 30)) == pytest.approx(30)
+
+
+def test_tiktok_lyrics_video(fake_youtube, monkeypatch):
+    from clipmaker import lyrics
+    lrc = "".join(f"[00:{s:02d}.00]Câu hát số {s}\n" for s in range(2, 58, 4))
+    recs = [{"trackName": "Bài Test (Remix)", "artistName": "Ca Sĩ", "duration": 60, "syncedLyrics": lrc},
+            {"trackName": "Bài Test", "artistName": "Ca Sĩ", "duration": 60, "syncedLyrics": lrc}]
+    monkeypatch.setattr(lyrics, "_get", lambda path, params: recs)
+    songs = [{"id": "mvmvmvmvmv1", "title": "Ca Sĩ - Bài Test (Official MV)", "duration": 75, "views": 1e8},
+             {"id": "audaudaudau", "title": "Bài Test - Official Audio", "duration": 60, "views": 1e6}]
+    real_search = yt.search
+    monkeypatch.setattr(yt, "search", lambda kw, n: songs if "Bài Test" in kw else real_search(kw, n))
+    got = []
+
+    def audio(vid, out, trim=True):
+        got.append((vid, trim))
+        compose.run(["-f", "lavfi", "-i", "sine=frequency=300:duration=60", "-ac", "2", str(out)])
+        return out
+    monkeypatch.setattr(music, "download_audio", audio)
+    c = TestClient(server.app)
+    t = c.post("/api/tiktok", json={"song": "Ca Sĩ - Bài Test", "length": 15, "bg": "city night"}).json()
+    for _ in range(3000):
+        t = next(x for x in c.get("/api/tiktok").json() if x["id"] == t["id"])
+        if t["job"]["done"]:
+            break
+        time.sleep(0.1)
+    assert t["job"]["error"] is None, t["job"]["error"]
+    assert got == [("audaudaudau", False)]                  # bản thu âm dài đúng bằng bản có lời, giữ khoảng lặng đầu
+    assert t["title"] == "Ca Sĩ - Bài Test" and t["output"] and not t["warn"]
+    assert 12 <= t["duration"] <= 19 and "#lyrics" in t["caption"] and "Câu hát số" in t["caption"]
+    out = server.DATA / "tiktok" / t["id"] / "output.mp4"
+    info = compose.probe(out)
+    assert info["audio"] and abs(info["duration"] - t["duration"]) < 0.3
+    # chỉnh lệch lời: dựng lại, không tải lại clip nền
+    n = len(fake_youtube)
+    c.put(f"/api/tiktok/{t['id']}", json={"offset": 0.5})
+    for _ in range(3000):
+        t = next(x for x in c.get("/api/tiktok").json() if x["id"] == t["id"])
+        if t["job"]["done"]:
+            break
+        time.sleep(0.1)
+    assert t["job"]["error"] is None and t["offset"] == 0.5 and len(fake_youtube) == n
+    assert c.delete(f"/api/tiktok/{t['id']}").json()["ok"] and not out.exists()

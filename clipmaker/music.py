@@ -348,12 +348,13 @@ def info(url_or_id):
 
 
 # ---------- tải + chuẩn hoá tiếng ----------
-def download_audio(vid, out):
-    """Tải phần tiếng của một bài -> FLAC 48 kHz stereo, cắt khoảng lặng đầu / cuối, âm lượng chuẩn (-14 LUFS)."""
+def download_audio(vid, out, trim=True):
+    """Tải phần tiếng của một bài -> FLAC 48 kHz stereo, cắt khoảng lặng đầu / cuối, âm lượng chuẩn (-14 LUFS).
+    trim=False: giữ nguyên khoảng lặng đầu (lời bài hát có mốc thời gian tính từ giây 0 của bản gốc)."""
     out = Path(out)
     if out.exists():
         return out
-    tmp_dir = out.parent / f"tmp_{vid}"
+    tmp_dir = out.parent / f"tmp_{out.stem}"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     try:
         opts = {**yt._base_opts(), "format": "bestaudio/best", "noplaylist": True, "noprogress": True,
@@ -366,10 +367,11 @@ def download_audio(vid, out):
                 raise yt.Blocked(str(e)) from e
             raise
         src = next(tmp_dir.glob("src.*"))
-        trim = "silenceremove=start_periods=1:start_threshold=-50dB:start_silence=0.1"
+        sil = "silenceremove=start_periods=1:start_threshold=-50dB:start_silence=0.1"
         part = out.with_suffix(".part.flac")
+        cut = f"{sil},areverse,{sil},areverse," if trim else ""
         compose.run(["-i", str(src), "-vn", "-af",
-                     f"{trim},areverse,{trim},areverse,loudnorm=I=-14:TP=-1.5:LRA=11,aresample={compose.SR}",
+                     f"{cut}loudnorm=I=-14:TP=-1.5:LRA=11,aresample={compose.SR}",
                      "-ac", "2", "-c:a", "flac", str(part)])
         part.replace(out)
         return out

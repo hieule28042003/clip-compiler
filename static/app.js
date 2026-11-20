@@ -27,7 +27,7 @@ async function copyText(text, btn) {
 }
 
 // ---------- khung trang + sidebar ----------
-const PAGES = ["home", "shortsPage", "musicPage", "mixEditor", "projectsPage", "trends", "channels", "settings", "editor"];
+const PAGES = ["home", "shortsPage", "musicPage", "tiktokPage", "mixEditor", "projectsPage", "trends", "channels", "settings", "editor"];
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const views = (n) => n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}K` : `${n || 0}`;
 let SEED = null;              // ý tưởng mang từ trang Xu hướng sang: {keyword, videos, ref}
@@ -1096,11 +1096,95 @@ function pollMix() {
   tick();
 }
 
+// ---------- 🎤 TikTok lời bài hát ----------
+let tPoll = null;
+
+async function showTikTok() {
+  V = null; M = null;
+  showPage("tiktokPage", "tiktok", "TikTok lời bài hát");
+  await loadTikTok();
+}
+
+async function loadTikTok() {
+  clearTimeout(tPoll);
+  if (!location.hash.startsWith("#/tiktok")) return;
+  const list = await api("/api/tiktok").catch(() => null);
+  if (!list) return;
+  const box = $("#tList");
+  if (!list.length) box.innerHTML = `<p class="hint">Chưa có video nào.</p>`;
+  const ids = list.map((t) => t.id);
+  [...box.querySelectorAll(".tt")].forEach((el) => { if (!ids.includes(el.dataset.id)) el.remove(); });
+  if (list.length) box.querySelector("p.hint")?.remove();
+  list.forEach((t, i) => {
+    let el = box.querySelector(`.tt[data-id="${t.id}"]`);
+    const key = JSON.stringify([t.stamp, t.job?.done, t.job?.error, t.job?.stage, Math.round((t.job?.progress || 0) * 100), t.warn, t.title]);
+    if (el && el.dataset.key === key) return;
+    const fresh = !el;
+    if (fresh) { el = document.createElement("div"); el.className = "tt"; el.dataset.id = t.id; }
+    el.dataset.key = key;
+    renderTT(el, t);
+    if (fresh) box.insertBefore(el, box.children[i] || null);
+  });
+  if (list.some((t) => t.job && !t.job.done)) tPoll = setTimeout(loadTikTok, 1500);
+}
+
+function renderTT(el, t) {
+  const busy = t.job && !t.job.done, pct = Math.round((t.job?.progress || 0) * 100), base = `/api/tiktok/${t.id}/files/`;
+  const len = t.length ? `${t.length} giây` : "cả bài";
+  const status = busy ? `<p class="note">${esc(t.job.stage || "Đang chuẩn bị")}… ${pct}%</p><div class="progress"><div style="width:${pct}%"></div></div>`
+    : t.job?.error ? `<p class="note bad">Lỗi: ${esc(t.job.error)}</p>` : "";
+  el.innerHTML = `${t.output && !busy ? `<video controls playsinline preload="metadata" src="${base}output.mp4?v=${t.stamp}"></video>`
+      : `<div class="ph">${busy ? "Đang làm…" : "Chưa có video"}</div>`}
+    <div class="info">
+      <b>${esc(t.title)}</b>
+      <span class="hint">${len}${t.duration ? ` (${fmt(t.duration)})` : ""} · nền “${esc(t.bg)}” · ${new Date(t.created * 1000).toLocaleString("vi-VN")}</span>
+      ${status}
+      ${t.warn ? `<p class="note">⚠ ${esc(t.warn)}</p>` : ""}
+      ${t.output && !busy ? `<label class="lbl">Caption TikTok <button class="mini" data-a="copy">Copy</button></label>
+      <textarea data-f="caption">${esc(t.caption || "")}</textarea>
+      <div class="offset"><span class="hint">Lệch lời (giây, + = chữ hiện muộn hơn):</span>
+        <input type="number" step="0.1" min="-10" max="10" value="${t.offset || 0}" data-f="offset">
+        <button class="mini" data-a="offset">Áp dụng</button></div>` : ""}
+      <div class="row">
+        ${t.output && !busy ? `<a class="link primary" href="${base}output.mp4?download=1">⬇ Tải video</a>
+          <a class="link" href="https://www.tiktok.com/tiktokstudio/upload" target="_blank" rel="noopener">TikTok Studio ↗</a>` : ""}
+        ${busy ? `<button class="mini" data-a="cancel">Huỷ</button>` : `<button class="mini" data-a="build">${t.output ? "🔁 Dựng lại" : "🎬 Dựng"}</button>
+          <button class="mini danger" data-a="del">Xoá</button>`}
+      </div>
+    </div>`;
+  const act = {
+    copy: (b) => copyText(el.querySelector("[data-f=caption]").value, b),
+    offset: () => api(`/api/tiktok/${t.id}`, json("PUT", { offset: +el.querySelector("[data-f=offset]").value })),
+    build: () => api(`/api/tiktok/${t.id}/build`, { method: "POST" }),
+    cancel: () => api(`/api/tiktok/${t.id}/cancel`, { method: "POST" }),
+    del: () => confirm("Xoá video này?") && api(`/api/tiktok/${t.id}`, { method: "DELETE" }),
+  };
+  el.querySelectorAll("[data-a]").forEach((b) => b.onclick = async () => {
+    try { await act[b.dataset.a](b); if (b.dataset.a !== "copy") loadTikTok(); } catch (e) { alert(e.message); }
+  });
+  const cap = el.querySelector("[data-f=caption]");
+  if (cap) cap.onchange = () => api(`/api/tiktok/${t.id}`, json("PUT", { caption: cap.value })).catch((e) => alert(e.message));
+}
+
+$("#tMake").onclick = async () => {
+  $("#tErr").textContent = "";
+  const song = $("#tSong").value.trim();
+  if (!song) { $("#tErr").textContent = "Nhập tên bài hát hoặc link YouTube"; return; }
+  $("#tMake").disabled = true;
+  try {
+    await api("/api/tiktok", json("POST", { song, length: +$("#tLen").value, bg: $("#tBg").value }));
+    $("#tSong").value = "";
+    await loadTikTok();
+  } catch (e) { $("#tErr").textContent = e.message; }
+  $("#tMake").disabled = false;
+};
+
 function route() {
   const h = location.hash, m = h.match(/^#\/p\/(\w+)/), mx = h.match(/^#\/m\/(\w+)/);
   if (m) showEditor(m[1]).catch((e) => { alert(e.message); location.hash = ""; });
   else if (mx) showMix(mx[1]).catch((e) => { alert(e.message); location.hash = "#/music"; });
   else if (h.startsWith("#/music")) showMusic();
+  else if (h.startsWith("#/tiktok")) showTikTok();
   else if (h.startsWith("#/trends")) showTrends();
   else if (h.startsWith("#/shorts")) showShorts();
   else if (h.startsWith("#/channels")) showChannels();
