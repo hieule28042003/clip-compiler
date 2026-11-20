@@ -18,6 +18,8 @@ from . import youtube as yt
 
 SUGGEST = "https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&hl=en&q={}"
 THIS_MONTH_MOST_VIEWED = "CAMSBAgEEAE%253D"      # bộ lọc của YouTube: tải lên tháng này, sắp theo lượt xem
+THIS_WEEK_MOST_VIEWED = "CAMSBAgDEAE%253D"       # tải lên tuần này, sắp theo lượt xem
+ALL_TIME_MOST_VIEWED = "CAMSAhAB"                 # mọi thời điểm, chỉ video, sắp theo lượt xem
 
 
 def suggestions(query):
@@ -29,10 +31,11 @@ def suggestions(query):
         return []
 
 
-def month_top(keyword, n=30):
-    """Video tải lên THÁNG NÀY nhiều lượt xem nhất cho từ khoá: [{id, title, channel, views, duration}]."""
-    url = (f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(keyword)}"
-           f"&sp={THIS_MONTH_MOST_VIEWED}")
+def top_videos(keyword, n=30, period="month"):
+    """Video tải lên tuần này / tháng này / mọi thời điểm ("all") nhiều lượt xem nhất cho từ khoá:
+    [{id, title, channel, views, duration}]."""
+    sp = {"week": THIS_WEEK_MOST_VIEWED, "all": ALL_TIME_MOST_VIEWED}.get(period, THIS_MONTH_MOST_VIEWED)
+    url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(keyword)}&sp={sp}"
     try:
         with yt_dlp.YoutubeDL({**yt._base_opts(), "extract_flat": True, "playlistend": n}) as y:
             res = y.extract_info(url, download=False)
@@ -41,6 +44,10 @@ def month_top(keyword, n=30):
     return [{"id": e["id"], "title": e["title"], "channel": e.get("channel") or e.get("uploader") or "",
              "views": e.get("view_count") or 0, "duration": e.get("duration") or 0}
             for e in list(res.get("entries") or [])[:n] if e.get("id") and e.get("title")]
+
+
+def month_top(keyword, n=30):
+    return top_videos(keyword, n, "month")
 
 
 def trending_titles(keyword, n=30):

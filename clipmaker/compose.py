@@ -2,6 +2,7 @@
 sau đoạn có thể chèn phần bình luận bằng giọng của người làm video (khung hình dừng + giọng thu âm).
 Mọi phần cùng thông số mã hoá nên nối bằng concat không cần mã hoá lại.
 """
+import re
 import subprocess
 import textwrap
 from pathlib import Path
@@ -205,18 +206,19 @@ def short_overlay(hook, bottom, number=None):
     img = Image.new("RGBA", (SW, SH), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     if hook:
-        size = 96
-        while size > 50:
-            f = font(size)
-            lines = _wrap(d, hook.upper(), f, SW * 0.88)
+        size = 120
+        while size > 56:
+            f = _impact(size)
+            lines = _wrap(d, hook.upper(), f, SW * 0.9)
             if len(lines) <= 3:
                 break
             size -= 6
-        lines = lines[:3]
-        y = SHORT_VIDEO_Y - 50 - len(lines) * size * 1.08
-        for l in lines:
-            d.text((SW / 2, y), l, font=f, fill=(255, 255, 255), anchor="mt", stroke_width=8, stroke_fill=(0, 0, 0))
-            y += size * 1.08
+        lines = _balance(d, lines[:3], f)
+        y = SHORT_VIDEO_Y - 50 - len(lines) * size * 1.12
+        for i, l in enumerate(lines):          # dòng xen trắng / vàng như thumbnail
+            d.text((SW / 2, y), l, font=f, fill=YELLOW if i % 2 else (255, 255, 255), anchor="mt",
+                   stroke_width=7, stroke_fill=(0, 0, 0))
+            y += size * 1.12
     if number is not None:
         f = font(50)
         label = f"#{number}"
@@ -231,8 +233,69 @@ def short_overlay(hook, bottom, number=None):
     return img
 
 
-def short_segment(src, out, length, ov_png, work, subs=()):
-    """Một đoạn -> video dọc cho Shorts: nền mờ phủ kín, video giữa, hook phía trên, phụ đề ngay dưới video."""
+EMOJI = re.compile("[\U0001F000-\U0001FFFF\u2600-\u27BF\uFE0F\u200d]")
+
+
+def reply_overlay(author, comment, reply, bottom):
+    """Short trả lời bình luận: khung bình luận trắng (kiểu "Trả lời bình luận" của TikTok / Shorts) phía trên,
+    câu đáp chữ to ngay trên video, nút dưới. Emoji bị bỏ (font không vẽ được)."""
+    img = Image.new("RGBA", (SW, SH), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    comment = re.sub(r"\s+", " ", EMOJI.sub("", comment)).strip() or "…"
+    reply = re.sub(r"\s+", " ", EMOJI.sub("", reply)).strip()
+    x0, x1, pad = 60, SW - 60, 36
+    for size in (50, 46, 42, 38, 34):
+        fc = font(size)
+        lines = _wrap(d, comment, fc, x1 - x0 - 2 * pad)
+        if len(lines) <= 4:
+            break
+    lines = lines[:4]
+    fr = _impact(92)
+    rlines = _balance(d, _wrap(d, reply.upper(), fr, SW * 0.88)[:2], fr) if reply else []
+    head_h = 70
+    card_h = pad + head_h + len(lines) * int(size * 1.25) + pad
+    reply_h = len(rlines) * 100
+    top = max(90, SHORT_VIDEO_Y - 40 - reply_h - (36 if rlines else 0) - card_h)
+    sh = Image.new("RGBA", (SW, SH), (0, 0, 0, 0))                   # bóng nhẹ cho khung nổi trên nền mờ
+    ImageDraw.Draw(sh).rounded_rectangle([x0 + 6, top + 10, x1 + 6, top + card_h + 10], radius=34, fill=(0, 0, 0, 110))
+    from PIL import ImageFilter
+    img.alpha_composite(sh.filter(ImageFilter.GaussianBlur(12)))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([x0, top, x1, top + card_h], radius=34, fill=(255, 255, 255, 250))
+    d.polygon([(x0 + 70, top + card_h - 2), (x0 + 120, top + card_h - 2), (x0 + 60, top + card_h + 40)],
+              fill=(255, 255, 255, 250))                                  # đuôi bong bóng
+    name = EMOJI.sub("", author or "").strip() or "a viewer"
+    cx, cy, r = x0 + pad + 28, top + pad + 26, 28
+    hue = sum(map(ord, name)) % 6
+    colors = [(239, 68, 68), (59, 130, 246), (16, 185, 129), (245, 158, 11), (168, 85, 247), (236, 72, 153)]
+    d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=colors[hue])
+    d.text((cx, cy), name.lstrip("@")[:1].upper() or "?", font=font(30), fill=(255, 255, 255), anchor="mm")
+    fh = font(30, "SemiBold")
+    label = f"Reply to {name}'s comment"
+    while d.textlength(label, font=fh) > x1 - x0 - 2 * pad - 80 and len(name) > 4:
+        name = name[:-2]
+        label = f"Reply to {name}…'s comment"
+    d.text((cx + r + 18, cy), label, font=fh, fill=(110, 110, 120), anchor="lm")
+    y = top + pad + head_h
+    for l in lines:
+        d.text((x0 + pad, y), l, font=fc, fill=(20, 20, 25))
+        y += int(size * 1.25)
+    y = top + card_h + 36
+    for i, l in enumerate(rlines):
+        d.text((SW / 2, y), l, font=fr, fill=YELLOW if i % 2 else (255, 255, 255), anchor="mt",
+               stroke_width=7, stroke_fill=(0, 0, 0))
+        y += 100
+    if bottom:
+        f = font(46, "SemiBold")
+        w = d.textlength(bottom, font=f) + 60
+        d.rounded_rectangle([SW / 2 - w / 2, SH - 430, SW / 2 + w / 2, SH - 350], radius=40, fill=(230, 30, 40, 235))
+        d.text((SW / 2, SH - 390), bottom, font=f, fill=(255, 255, 255), anchor="mm")
+    return img
+
+
+def short_segment(src, out, length, ov_png, work, subs=(), voice_mp3=None, voice_at=0.3):
+    """Một đoạn -> video dọc cho Shorts: nền mờ phủ kín, video giữa, hook phía trên, phụ đề ngay dưới video.
+    voice_mp3: giọng đọc phát từ giây voice_at, tiếng gốc nhỏ lại trong lúc đọc."""
     info = probe(src)
     length = min(length, info["duration"]) if info["duration"] else length
     v = (f"[0:v]fps={FPS},split[a][b];[a]scale={SW}:{SH}:force_original_aspect_ratio=increase,crop={SW}:{SH},"
@@ -252,6 +315,16 @@ def short_segment(src, out, length, ov_png, work, subs=()):
     else:
         a, amap = "", f"{2 + len(sub_inputs) // 6}:a"
         extra = ["-f", "lavfi", "-t", f"{length:.3f}", "-i", f"anullsrc=r={SR}:cl=stereo"]
+    if voice_mp3:
+        vi = 2 + len(sub_inputs) // 6 + (1 if extra else 0)
+        vd = probe(voice_mp3)["duration"] or 2.0
+        base = "[a]" if info["audio"] else f"[{amap}]"
+        ms = int(voice_at * 1000)
+        a += (f";{base}volume='if(between(t,{voice_at:.2f},{voice_at + vd + 0.2:.2f}),0.25,1)':eval=frame[duck];"
+              f"[{vi}:a]aresample={SR},aformat=channel_layouts=stereo,adelay={ms}|{ms},volume=1.6[vo];"
+              f"[duck][vo]amix=inputs=2:duration=first:normalize=0[am]")
+        amap = "[am]"
+        extra = [*extra, "-i", str(voice_mp3)]
     run(["-i", str(src), "-i", str(ov_png), *sub_inputs, *extra, "-filter_complex", v + a, "-map", "[v]",
          "-map", amap, "-t", f"{length:.3f}", *VCODEC, *ACODEC, "-movflags", "+faststart", str(out)])
     return out
@@ -265,8 +338,8 @@ def _pop(img):
     """Màu rực + tương phản cao kiểu thumbnail YouTube."""
     from PIL import ImageEnhance
 
-    img = ImageEnhance.Color(img).enhance(1.35)
-    img = ImageEnhance.Contrast(img).enhance(1.15)
+    img = ImageEnhance.Color(img).enhance(1.5)
+    img = ImageEnhance.Contrast(img).enhance(1.22)
     return ImageEnhance.Sharpness(img).enhance(1.3)
 
 
@@ -684,9 +757,23 @@ def thumbnails(shots, text, top_n, out_dir):
     face_shot = next((x for x in shots if x.get("face") and x is not wide), hero)
     f_img, _ = _focus(face_shot, 400, 400, face_h=0.62)
     bub = _bubble(f_img, 360)
-    t = t.convert("RGBA")
-    t.alpha_composite(bub, (1280 - bub.width - 10 if face_left else 10, 720 - bub.height - 10))
+    bx = 1280 - bub.width - 10 if face_left else 10
     box = (440, 10, 1270, 300) if face_left else (20, 10, 850, 300)
+    if wide.get("act"):             # vòng đỏ + mũi tên chỉ đúng chỗ có hành động, khi không đè lên chữ / bong bóng
+        r = _clip_box(to(wide["act"]), 1280, 720)
+        area = (r[2] - r[0]) * (r[3] - r[1])
+        hit = sum(max(0, min(r[2], b[2]) - max(r[0], b[0])) * max(0, min(r[3], b[3]) - max(r[1], b[1]))
+                  for b in (box, (bx, 720 - bub.height - 10, bx + bub.width, 720)))
+        if hit < area * 0.12:
+            d = ImageDraw.Draw(t)
+            _ring(d, r)
+            cy = (r[1] + r[3]) / 2
+            if r[0] > 260:
+                _arrow(d, r[0] - 40, cy, 0.8, angle_left=True)
+            elif r[2] < 1020:
+                _arrow(d, r[2] + 40, cy, 0.8, angle_left=False)
+    t = t.convert("RGBA")
+    t.alpha_composite(bub, (bx, 720 - bub.height - 10))
     t = _headline(t.convert("RGB"), text, box, angle=-3, max_size=150, lines_max=2)
     save(t, "thumb_2.jpg")
 

@@ -27,7 +27,7 @@ async function copyText(text, btn) {
 }
 
 // ---------- khung trang + sidebar ----------
-const PAGES = ["home", "projectsPage", "trends", "channels", "settings", "editor"];
+const PAGES = ["home", "shortsPage", "musicPage", "mixEditor", "projectsPage", "trends", "channels", "settings", "editor"];
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const views = (n) => n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}K` : `${n || 0}`;
 let SEED = null;              // ý tưởng mang từ trang Xu hướng sang: {keyword, videos, ref}
@@ -46,12 +46,12 @@ async function loadProjects() {
     const a = document.createElement("a");
     a.className = "proj"; a.href = `#/p/${p.id}`;
     a.innerHTML = `<span><b>${esc(p.title)}</b><br><span class="hint">“${esc(p.keyword)}” · ${p.clips} đoạn · `
-      + `${new Date(p.created * 1000).toLocaleDateString("vi-VN")}</span></span><span class="hint">${p.done ? "✓ đã dựng" : ""}</span>`;
+      + `${new Date(p.created * 1000).toLocaleDateString("vi-VN")}</span></span><span class="hint">${p.kind === "shorts" ? "✂ Shorts " : ""}${p.done ? "✓ đã dựng" : ""}</span>`;
     box.appendChild(a);
   }
   const cur = V?.project?.id;
   $("#recent").innerHTML = list.slice(0, 8).map((p) =>
-    `<a href="#/p/${p.id}" class="${p.id === cur ? "on" : ""}" title="${esc(p.title)}">${p.done ? "✓ " : ""}${esc(p.title)}</a>`).join("")
+    `<a href="#/p/${p.id}" class="${p.id === cur ? "on" : ""}" title="${esc(p.title)}">${p.done ? "✓ " : ""}${p.kind === "shorts" ? "✂ " : ""}${esc(p.title)}</a>`).join("")
     || `<p class="hint">Chưa có</p>`;
 }
 
@@ -81,10 +81,13 @@ function renderSeed() {
 
 // tạo dự án theo thiết lập trên form; auto = làm hết không cần duyệt
 async function createProject(auto, keyword = $("#kw").value, seed = SEED) {
+  const fromStream = !seed && $("#src").value === "stream";
+  const streams = fromStream ? $("#streams").value.split(/\s+/).filter(Boolean) : [];
+  if (fromStream && !streams.length) throw new Error("Dán ít nhất một link stream");
   const res = await api("/api/projects", json("POST", {
-    keyword, videos: +$("#nVideos").value, length: +$("#clipLen").value,
+    keyword: fromStream ? "stream" : keyword, streams, videos: +$("#nVideos").value, length: +$("#clipLen").value,
     minutes: +$("#minutes").value, comments: $("#useComments").checked, auto,
-    voiceover: $("#voiceover").checked, voice: $("#voice").value, shorts: $("#shorts").checked,
+    voiceover: !fromStream && $("#voiceover").checked, voice: $("#voice").value, shorts: $("#shorts").checked,
     seed_videos: seed ? seed.videos.map((v) => v.id) : [], ref: seed ? seed.ref : "" }));
   SEED = null;
   location.hash = `#/p/${res.project.id}`;
@@ -92,6 +95,54 @@ async function createProject(auto, keyword = $("#kw").value, seed = SEED) {
 $("#createBtn").onclick = () => { $("#createErr").textContent = ""; createProject(false).catch((e) => { $("#createErr").textContent = e.message; }); };
 $("#autoCreateBtn").onclick = () => { $("#createErr").textContent = ""; createProject(true).catch((e) => { $("#createErr").textContent = e.message; }); };
 $("#kw").onkeydown = (e) => { if (e.key === "Enter") $("#createBtn").click(); };
+$("#src").onchange = () => {
+  const isStream = $("#src").value === "stream";
+  for (const id of ["#srcStreamHint", "#streamsBox", "#streamWarn"]) $(id).classList.toggle("hidden", !isStream);
+  for (const id of ["#kwBox", "#nVideosBox", "#useCommentsBox", "#voiceoverBox", "#kwWarn"]) $(id).classList.toggle("hidden", isStream);
+  document.querySelectorAll("#home .streamOpt").forEach((o) => { o.hidden = !isStream; });
+  // stream: đoạn dài hơn (cần phần dẫn + phản ứng), không dùng đoạn 6–15 giây
+  document.querySelectorAll("#clipLen option").forEach((o) => { if (+o.value < 30) o.hidden = isStream; });
+  if (isStream && +$("#clipLen").value < 30) $("#clipLen").value = "45";
+  if (!isStream && +$("#clipLen").value > 15) $("#clipLen").value = "10";
+  if (!isStream && +$("#minutes").value > 20) $("#minutes").value = "15";
+};
+
+// ---------- chỉ làm Shorts ----------
+async function showShorts() {
+  V = null;
+  showPage("shortsPage", "shorts", "Làm Shorts");
+  loadProjects();
+}
+
+async function createShorts(auto, keyword = $("#sKw").value, seed = null) {
+  $("#sErr").textContent = "";
+  const fromStream = !seed && $("#sStyle").value === "stream";
+  try {
+    const res = await api("/api/projects", json("POST", {
+      keyword: fromStream ? "stream" : keyword, stream: fromStream ? $("#sStream").value : "",
+      kind: "shorts", count: +$("#sCount").value, length: +$("#sLen").value,
+      videos: +$("#sVideos").value, minutes: 5, auto, voiceover: false, shorts: true,
+      reply: !seed && $("#sStyle").value === "reply", voice: $("#voice").value,
+      seed_videos: seed ? seed.videos.map((v) => v.id) : [], ref: seed ? seed.ref : "" }));
+    location.hash = `#/p/${res.project.id}`;
+  } catch (e) { if (seed) throw e; $("#sErr").textContent = e.message; }
+}
+$("#sStyle").onchange = () => {
+  const st = $("#sStyle").value, isStream = st === "stream";
+  $("#sReplyHint").classList.toggle("hidden", st !== "reply");
+  for (const id of ["#sStreamHint", "#sStreamBox", "#sStreamWarn"]) $(id).classList.toggle("hidden", !isStream);
+  for (const id of ["#sKwBox", "#sVideosBox", "#sWarn"]) $(id).classList.toggle("hidden", isStream);
+  document.querySelectorAll("#shortsPage .streamOpt").forEach((o) => { o.hidden = !isStream; });
+  // stream: Short dài hơn (cần phần dẫn + phản ứng), không có 10–20 giây
+  document.querySelectorAll("#sLen option").forEach((o) => { if (+o.value < 30) o.hidden = isStream; });
+  if (isStream && +$("#sLen").value < 30) $("#sLen").value = "45";
+  if (!isStream && +$("#sLen").value > 30) $("#sLen").value = "20";
+  if (!isStream && +$("#sCount").value > 10) $("#sCount").value = "5";
+};
+$("#sAutoBtn").onclick = () => createShorts(true);
+$("#sCreateBtn").onclick = () => createShorts(false);
+$("#sKw").onkeydown = (e) => { if (e.key === "Enter") $("#sAutoBtn").click(); };
+$("#sStream").onkeydown = (e) => { if (e.key === "Enter") $("#sAutoBtn").click(); };
 
 // ---------- xu hướng ----------
 const NICHES = ["funny moments", "celebrity funny moments", "talk show funny moments", "interview funny moments",
@@ -112,7 +163,7 @@ async function showTrends() {
 $("#trendBtn").onclick = async () => {
   $("#trendNote").className = "note"; $("#trendNote").textContent = "";
   try {
-    await api("/api/trends", json("POST", { seed: $("#seed").value, depth: +$("#depth").value }));
+    await api("/api/trends", json("POST", { seed: $("#seed").value, depth: +$("#depth").value, period: $("#period").value }));
     pollTrends();
   } catch (e) { $("#trendNote").className = "note bad"; $("#trendNote").textContent = e.message; }
 };
@@ -162,7 +213,10 @@ function renderTrends(res) {
   $("#trendOut").classList.toggle("hidden", !res);
   if (!res) return;
   $("#seed").value = res.seed;
-  $("#trendAt").textContent = `· “${res.seed}” · ${new Date(res.at * 1000).toLocaleString("vi-VN")}`;
+  const span = res.period === "week" ? "7 ngày qua" : "30 ngày qua";
+  $("#period").value = res.period || "month";
+  $("#trendAt").textContent = `· “${res.seed}” · ${span} · ${new Date(res.at * 1000).toLocaleString("vi-VN")}`;
+  renderAnalysis(res.analysis, span);
   const tb = $("#topics"); tb.innerHTML = "";
   if (!res.topics.length) tb.innerHTML = `<p class="hint">Chưa tìm ra chủ đề nổi bật — thử lĩnh vực cụ thể hơn hoặc độ sâu “Kỹ”.</p>`;
   res.topics.forEach((t, i) => {
@@ -171,7 +225,7 @@ function renderTrends(res) {
     d.innerHTML = `<div class="tThumbs">${t.videos.slice(0, 3).map((v) =>
         `<a href="https://youtu.be/${v.id}" target="_blank" rel="noopener" title="${esc(v.title)}"><img src="https://i.ytimg.com/vi/${v.id}/mqdefault.jpg" alt=""></a>`).join("")}</div>
       <div class="tHead"><span class="rank">#${i + 1}</span><b>${esc(t.name)}</b></div>
-      <div class="hint">${views(t.views)} view tháng này · ${t.count} video hot ·
+      <div class="hint">${views(t.views)} view ${res.period === "week" ? "tuần này" : "tháng này"} · ${t.count} video hot ·
         ${t.source === "search" ? "🔎 người xem đang tìm" : "⭐ có mặt ở nhiều video hot"}</div>
       <ul>${t.videos.slice(0, 2).map((v) => `<li>${esc(v.title)} <span class="hint">· ${views(v.views)}</span></li>`).join("")}</ul>
       <div class="row"><button class="primary auto" title="Quét, chọn, lời bình, dựng + Shorts — không cần duyệt">⚡ Làm tự động</button>
@@ -194,6 +248,67 @@ function renderTrends(res) {
   });
   $("#patterns").innerHTML = res.patterns.map((p) => `<span class="chip">${esc(p.text)} <b>×${p.hits}</b></span>`).join("")
     || `<p class="hint">Không có kiểu nổi bật.</p>`;
+}
+
+// phân tích: cái gì đang ăn khách + video đang lên để làm tương tự
+const bars = (rows, label, val, txt) => {
+  const max = Math.max(1, ...rows.map(val));
+  return rows.map((r, i) => `<div class="bar${i === 0 && rows.length > 1 ? " lead" : ""}"><span>${label(r)}</span><span class="hint">${txt(r)}</span>
+    <div class="track"><div style="width:${Math.round(100 * val(r) / max)}%"></div></div></div>`).join("");
+};
+const dur = (s) => s >= 3600 ? `${Math.floor(s / 3600)}:${String(Math.floor(s / 60) % 60).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`
+  : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+
+function renderAnalysis(a, span) {
+  $("#anaBox").classList.toggle("hidden", !a);
+  if (!a) return;
+  $("#anaAt").textContent = `· ${a.count} video hot ${span}`;
+  $("#anaTips").innerHTML = a.tips.map((t) => `<li>${esc(t)}</li>`).join("") || `<li class="hint">Chưa đủ dữ liệu để kết luận.</li>`;
+  const f = [{ k: "🎬 Video dài", ...a.format.long }, { k: "✂ Shorts", ...a.format.shorts }].filter((x) => x.count)
+    .sort((x, y) => y.median - x.median);
+  $("#anaFormat").innerHTML = bars(f, (r) => r.k, (r) => r.median,
+    (r) => `${r.count} video · trung vị ${views(r.median)}`) + `<p class="hint">Thanh = view trung vị mỗi video</p>`;
+  const lens = [...a.lengths].sort((x, y) => y.median - x.median);
+  $("#anaLen").innerHTML = lens.length ? bars(lens, (r) => r.label, (r) => r.median, (r) => `${r.count} video · ${views(r.median)}`)
+    : `<p class="hint">Không có video dài.</p>`;
+  $("#anaFeat").innerHTML = (a.features.length ? bars(a.features, (r) => r.label, (r) => r.lift,
+    (r) => `×${r.lift} · ${r.share}% video top`) : `<p class="hint">Chưa đủ video để so sánh.</p>`)
+    + (a.patterns.length ? `<div class="row mt">${a.patterns.map((p) => `<span class="chip">${esc(p.text)} <b>×${p.hits}</b></span>`).join("")}</div>` : "");
+  $("#anaDays").innerHTML = (a.days.length ? bars(a.days, (r) => r.label, (r) => r.median, (r) => `${r.count} video · ${views(r.median)}`)
+    : `<p class="hint">Chưa đủ video có ngày đăng.</p>`)
+    + (a.hours.length ? bars(a.hours, (r) => r.label, (r) => r.median, (r) => `${r.count} video · ${views(r.median)}`) : "")
+    + `<p class="hint">Chỉ tính các video hot nhất đã xem chi tiết; giờ theo máy bạn.</p>`;
+  $("#anaCh").innerHTML = bars(a.channels, (r) => esc(r.name), (r) => r.views, (r) => `${r.count} video · ${views(r.views)}`);
+  const box = $("#rising"); box.innerHTML = "";
+  if (!a.rising.length) box.innerHTML = `<p class="hint">Không lấy được chi tiết video (YouTube chặn tạm thời?). Thử lại sau.</p>`;
+  a.rising.forEach((r, i) => {
+    const d = document.createElement("div");
+    d.className = "topic card rise";
+    const kw = r.keyword || $("#seed").value;
+    d.innerHTML = `<a href="https://youtu.be/${r.id}" target="_blank" rel="noopener"><img src="https://i.ytimg.com/vi/${r.id}/mqdefault.jpg" alt=""></a>
+      <div class="tHead"><span class="rank">#${i + 1}</span> <span class="badge">${r.short ? "✂ Shorts" : "🎬 " + dur(r.duration)}</span></div>
+      <div class="ttl">${esc(r.title)}</div>
+      <div class="hint">${esc(r.channel)}${r.subs ? ` · ${views(r.subs)} sub` : ""} · ${views(r.views)} view${r.age ? ` · ${r.age < 1 ? "<1" : Math.round(r.age)} ngày` : ""}</div>
+      <ul class="why">${r.why.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>
+      <div class="hint">Làm tương tự với từ khoá: <b>${esc(kw)}</b>${r.short ? " · dạng Shorts" : ""}</div>
+      <div class="row"><button class="primary auto" title="Quét, chọn, dựng không cần duyệt">⚡ Làm tương tự</button>
+        <button class="manual" title="Mở dự án để tự duyệt">🎬 Tự làm</button></div>`;
+    const seed = { keyword: kw, ref: r.topic || r.title.slice(0, 80),
+      videos: [{ id: r.id, title: r.title }, ...r.similar.map((id) => ({ id, title: "" }))] };
+    d.querySelector(".auto").onclick = async (e) => {
+      if (!confirm(`Làm tự động ${r.short ? "Shorts" : "video"} tương tự “${r.title}”?\n\nTừ khoá: ${kw}\n`
+        + (r.short ? `Dùng thiết lập ở trang ✂ Làm Shorts (${$("#sCount").value} Shorts).` : `Dùng thiết lập ở trang Tạo video ghép (${$("#minutes").value} phút).`))) return;
+      e.target.disabled = true;
+      try { r.short ? await createShorts(true, kw, seed) : await createProject(true, kw, seed); }
+      catch (err) { alert(err.message); e.target.disabled = false; }
+    };
+    d.querySelector(".manual").onclick = async (e) => {
+      if (!r.short) return useIdea(kw, seed.videos, seed.ref);
+      e.target.disabled = true;
+      try { await createShorts(false, kw, seed); } catch (err) { alert(err.message); e.target.disabled = false; }
+    };
+    box.appendChild(d);
+  });
 }
 
 // ---------- kênh YouTube ----------
@@ -341,11 +456,13 @@ function renderAccounts(r) {
       </div>
       <div class="row">
         <label class="check"><input type="checkbox" data-f="long"> 🎬 Đăng video dài</label>
-        <label class="check"><input type="checkbox" data-f="shorts"> ✂ Đăng 3 Shorts</label>
+        <label class="check"><input type="checkbox" data-f="shorts"> ✂ Đăng
+          <select data-f="shorts_n" class="inline" style="width:auto">${[1, 2, 3, 5, 8, 10].map((n) => `<option value="${n}">${n}</option>`).join("")}</select> Shorts</label>
         <label class="check"><input type="checkbox" data-f="voiceover"> 🤖 Lời bình giọng đọc</label>
       </div>
       ${scheduleBox(a)}
       ${growBox(a)}
+      ${a.long ? "" : `<p class="hint">✂ Kênh <b>chỉ làm Shorts</b> (không dựng video dài, nhanh hơn). Mỗi Short tải lên tốn 1.600 đơn vị hạn mức API (khoảng 6 Shorts/ngày cho mỗi Client ID).</p>`}
       <p class="hint">${a.daily ? `⏰ Tự làm video lúc ${a.daily} mỗi ngày.` : ""} ${a.used?.length ? `Chủ đề gần đây: ${esc(a.used.slice(-3).map((u) => u.split("|").pop()).join(", "))}` : ""}</p>`;
     for (const el of d.querySelectorAll("[data-f]")) {
       const f = el.dataset.f, v = a[f];
@@ -354,7 +471,7 @@ function renderAccounts(r) {
       el.onchange = async () => {
         const val = el.type === "checkbox" ? el.checked : f === "seeds" ? el.value.split("\n")
           : f.startsWith("slots_") ? el.value.split(/[,;\s]+/).filter(Boolean)
-          : ["minutes", "per_run"].includes(f) ? +el.value : el.value;
+          : ["minutes", "per_run", "shorts_n"].includes(f) ? +el.value : el.value;
         try { renderChannels(await api(`/api/channels/${a.id}`, json("PUT", { [f]: val })), true); }
         catch (e) { alert(e.message); renderAccounts(CH); }
       };
@@ -432,8 +549,17 @@ async function showEditor(id) {
 
 function apply(res, full) {
   V = res;
-  const P = V.project;
-  $("#crumb").textContent = `“${P.keyword}”` + (P.ref ? ` · 💡 ý tưởng từ xu hướng: ${P.ref}` : "");
+  const P = V.project, only = P.kind === "shorts";
+  $("#editor").classList.toggle("shortsMode", only);
+  $("#buildBtn").textContent = only ? "✂ Cắt Shorts" : "🎬 Dựng video";
+  const sig = P.signals;
+  $("#crumb").textContent = P.stream
+    ? (only ? `📺 Cắt Shorts từ stream của ${P.keyword}` : `📺 Video tổng hợp ${(P.streams || [1]).length} buổi stream của ${P.keyword}`) + (sig ? ` · chấm điểm bằng: ${[sig.chat && `${views(sig.chat)} tin chat`,
+      sig.loud && "độ to âm thanh", sig.heat && "Most replayed", sig.marks && `${sig.marks} bình luận có mốc giờ`].filter(Boolean).join(", ")}`
+      + (sig.notes.length ? ` (${sig.notes.join(", ")})` : "") : "")
+    : (only ? "✂ Shorts · " : "") + `“${P.keyword}”` + (P.ref ? ` · 💡 ý tưởng từ xu hướng: ${P.ref}` : "");
+  $("#moreBtn").classList.toggle("hidden", !!P.stream);
+  document.querySelectorAll("#editor .streamOpt").forEach((o) => { o.hidden = !P.stream; });
   if (full) {
     $("#title").value = P.title;
     $("#countdown").checked = P.countdown !== false;
@@ -443,7 +569,8 @@ function apply(res, full) {
     $("#shortsOpt").checked = P.shorts !== false;
     if (P.voice) $("#ttsVoice").value = P.voice;
     if (P.takes) $("#ttsTakes").value = String([3, 5, 8].includes(P.takes) ? P.takes : 3);
-    $("#autoMin").value = String([10, 15, 20].includes(P.minutes) ? P.minutes : 15);
+    $("#autoMin").value = String([10, 15, 20, ...(P.stream ? [30] : [])].includes(P.minutes) ? P.minutes : 15);
+    $("#autoCount").value = String([3, 5, 8, 10, ...(P.stream ? [15, 20] : [])].includes(P.count) ? P.count : 5);
   }
   renderClips();
   showOutput();
@@ -456,6 +583,16 @@ function renderClips() {
   V.plan.forEach((x, i) => plan.appendChild(clipCard(byId[x.id], x.number, i)));
   const others = P.clips.filter((c) => !c.include);
   for (const c of others.slice(0, 80)) rest.appendChild(clipCard(c, null, -1));
+  if (P.kind === "shorts") {
+    const want = P.count || 5, busy = V.job && !V.job.done;
+    $("#planInfo").textContent = `· ${V.plan.length} Shorts`;
+    $("#restInfo").textContent = others.length ? `· ${others.length} đoạn (điểm cao trước)` : "";
+    const few = V.plan.length < want && !busy && P.clips.length;
+    $("#shortWarn").classList.toggle("hidden", !few);
+    if (few) $("#shortWarn").textContent = P.stream ? `Stream này chỉ có ${V.plan.length} đoạn nổi bật đủ mạnh.` : `Mới có ${V.plan.length} / ${want} đoạn hay (mỗi video gốc lấy 1 đoạn). Bấm "Quét thêm 20 video" rồi "Tự chọn lại".`;
+    if (!P.clips.length && !busy) plan.innerHTML = `<p class="hint">Chưa có đoạn nào.</p>`;
+    return;
+  }
   $("#planInfo").textContent = `· ${V.plan.length} đoạn · video dài khoảng ${fmt(V.total)}`;
   $("#restInfo").textContent = others.length ? `· ${others.length} đoạn (điểm cao trước)` : "";
   const target = (P.minutes || 15) * 60;
@@ -463,7 +600,8 @@ function renderClips() {
   $("#shortWarn").classList.toggle("hidden", !short || !P.clips.length);
   if (short) {
     $("#shortWarn").textContent = V.pool < target
-      ? `Mới đủ ${fmt(V.total)} / ${fmt(target)}: các video đã quét chỉ có ${fmt(V.pool)} đoạn hay. Bấm "Quét thêm 20 video" (có thể bấm nhiều lần) rồi "Tự chọn lại".`
+      ? (P.stream ? `Mới đủ ${fmt(V.total)} / ${fmt(target)}: các buổi stream chỉ có ${fmt(V.pool)} đoạn nổi bật. Thêm buổi stream khác (tạo dự án mới) hoặc chọn thời lượng ngắn hơn.`
+        : `Mới đủ ${fmt(V.total)} / ${fmt(target)}: các video đã quét chỉ có ${fmt(V.pool)} đoạn hay. Bấm "Quét thêm 20 video" (có thể bấm nhiều lần) rồi "Tự chọn lại".`)
       : `Mới chọn ${fmt(V.total)} / ${fmt(target)}. Thêm đoạn từ "Ứng viên khác" hoặc bấm "Tự chọn lại".`;
   }
   if (!P.clips.length && !(V.job && !V.job.done)) plan.innerHTML = `<p class="hint">Chưa có đoạn nào.</p>`;
@@ -479,6 +617,19 @@ function clipCard(c, number, idx) {
   el.querySelector("img").src = `https://i.ytimg.com/vi/${c.vid}/mqdefault.jpg`;
   el.querySelector("b").textContent = v.title;
   el.querySelector(".meta").textContent = `${v.channel} · đoạn ${fmt(c.start)}–${fmt(c.end)} (${Math.round(c.end - c.start)} giây) · điểm ${c.score}`;
+  if (V.project.reply) {        // Short trả lời bình luận: bình luận sẽ hiện trong khung
+    const d = document.createElement("div");
+    d.className = c.comment ? "good" : "hint";
+    d.textContent = c.comment ? `💬 Trả lời ${c.author || "người xem"} (${views(c.c_likes || 0)} like): “${c.comment}”`
+      : "Đoạn này không có bình luận: Short sẽ dùng câu hook thường";
+    el.querySelector(".why").appendChild(d);
+  }
+  if (V.project.stream && c.comment) {     // hook to phía trên Short lấy từ câu chat này
+    const d = document.createElement("div");
+    d.className = "good";
+    d.textContent = `💬 Chat hay gõ: “${c.comment}”`;
+    el.querySelector(".why").appendChild(d);
+  }
   for (const r of c.reasons || []) { const d = document.createElement("div"); d.textContent = r; el.querySelector(".why").appendChild(d); }
   const ctl = el.querySelector(".ctl");
   const btn = (label, title, fn, cls = "mini") => {
@@ -497,7 +648,7 @@ function clipCard(c, number, idx) {
   btn("đầu +1s ▶", "Bắt đầu muộn hơn 1 giây", () => edit(c, { start: c.start + 1 }));
   btn("◀ cuối −1s", "Kết thúc sớm hơn 1 giây", () => edit(c, { end: c.end - 1 }));
   btn("cuối +1s ▶", "Kết thúc muộn hơn 1 giây", () => edit(c, { end: c.end + 1 }));
-  if (number != null) {
+  if (number != null && V.project.kind !== "shorts") {      // Shorts không dùng chú thích / bình luận thu
     const cap = document.createElement("input");
     cap.placeholder = "Chú thích hiện trên đoạn (tuỳ chọn)"; cap.value = c.caption || ""; cap.maxLength = 120;
     cap.onchange = () => edit(c, { caption: cap.value });
@@ -576,7 +727,7 @@ $("#ttsBtn").onclick = async () => {
 };
 $("#autoBtn").onclick = async () => {
   if (V.plan.length && !confirm("Chọn lại từ đầu theo điểm? Thứ tự và các đoạn bạn tự thêm sẽ bị thay.")) return;
-  apply(await api(`/api/projects/${V.project.id}/autoselect`, json("POST", { minutes: +$("#autoMin").value })));
+  apply(await api(`/api/projects/${V.project.id}/autoselect`, json("POST", { minutes: +$("#autoMin").value, count: +$("#autoCount").value })));
 };
 $("#moreBtn").onclick = async () => {
   try { await api(`/api/projects/${V.project.id}/more`, json("POST", { videos: 20 })); poll(); }
@@ -599,6 +750,11 @@ function showOutput() {
   $("#outBox").classList.toggle("hidden", !ok);
   if (!ok) return;
   const base = `/api/projects/${P.id}/files/`;
+  if (P.kind === "shorts") {
+    $("#ytTags").value = P.youtube?.tags || "";
+    showShortList(P, base);
+    return;
+  }
   if (!$("#outVideo").src.includes(P.output_stamp)) $("#outVideo").src = `${base}output.mp4?v=${P.output_stamp}`;
   $("#dlVideo").href = `${base}output.mp4?download=1`;
   const th = $("#thumbs"); th.innerHTML = "";
@@ -610,6 +766,10 @@ function showOutput() {
     th.appendChild(a);
   }
   if (P.youtube) showCopy(P.youtube);
+  showShortList(P, base);
+}
+
+function showShortList(P, base) {
   const sh = P.shorts_out || [];
   $("#shortsBox").classList.toggle("hidden", !sh.length);
   $("#shortsList").innerHTML = sh.map((x, i) => `<div class="short">
@@ -670,7 +830,7 @@ function poll() {
     if (busy) {
       note.className = "note";
       note.textContent = (job.kind === "auto" ? "⚡ Làm tự động: " : "") + `${job.stage || "Đang chuẩn bị"}… ${pct}%`
-        + (scan || job.kind === "tts" ? "" : " (video 15 phút mất khoảng 10–25 phút)");
+        + (scan || job.kind === "tts" ? "" : V.project.kind === "shorts" ? " (khoảng 3–8 phút)" : " (video 15 phút mất khoảng 10–25 phút)");
       // làm tự động: hiện các đoạn đã chọn ngay khi quét xong, không phải chờ dựng xong
       if (job.kind === "auto" && job.stage !== stage) { stage = job.stage; apply(await api(`/api/projects/${id}`), true); }
       pollTimer = setTimeout(tick, 1000);
@@ -684,7 +844,7 @@ function poll() {
       note.textContent = `Đã tạo ${r.takes} lời bình giọng đọc (🤖). Bấm “Dựng video” để ghép vào.`;
     } else if (!scan) {
       note.className = r.note ? "note bad" : "note ok";
-      note.textContent = `Xong! ${r.clips} đoạn, dài ${fmt(r.duration)}` + (r.shorts ? ` + ${r.shorts} Shorts.` : ".")
+      note.textContent = (V.project.kind === "shorts" ? `Xong! ${r.shorts} Shorts.` : `Xong! ${r.clips} đoạn, dài ${fmt(r.duration)}` + (r.shorts ? ` + ${r.shorts} Shorts.` : "."))
         + (r.failed ? ` ${r.failed} đoạn không tải được nên đã bỏ.` : "") + (r.note ? " " + r.note : "");
     }
   };
@@ -738,10 +898,211 @@ $("#ckTest").onclick = async () => {
   await cookieAction(() => api("/api/settings/cookies/test", { method: "POST" }), "✓ Cookie dùng được — app sẽ tải video bằng cookie này.");
 };
 
+// ---------- 🎵 ghép nhạc ----------
+let M = null, mPoll = null, MOPT = null;
+
+async function showMusic() {
+  V = null; M = null;
+  showPage("musicPage", "music", "Ghép nhạc");
+  if (!MOPT) {
+    MOPT = await api("/api/music/options");
+    $("#mCountry").innerHTML = Object.entries(MOPT.countries).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join("");
+    $("#mGenre").innerHTML = Object.entries(MOPT.genres).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join("");
+    $("#mVersion").innerHTML = Object.entries(MOPT.versions).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join("");
+    $("#mVersion").onchange = showUsed;
+  }
+  MOPT.used = (await api("/api/music/options")).used;
+  showUsed();
+  const list = await api("/api/mixes");
+  $("#mixes").innerHTML = list.length ? list.map((m) => `<a class="proj" href="#/m/${m.id}"><span><b>${esc(m.title)}</b><br>
+    <span class="hint">${m.songs} bài · ${new Date(m.created * 1000).toLocaleDateString("vi-VN")}</span></span>
+    <span class="hint">${m.done ? "✓ đã dựng" : ""}</span></a>`).join("") : `<p class="hint">Chưa có bản mix nào.</p>`;
+}
+
+const COUNT_LABEL = {
+  playlist: { 10: "10 bài (~35 phút)", 15: "15 bài (~50 phút)", 20: "20 bài (~1 giờ 10)", 30: "30 bài (~1 giờ 45)" },
+  mashup: { 10: "10 bài (~2,5 phút)", 15: "15 bài (~4 phút)", 20: "20 bài (~5 phút)", 30: "30 bài (~7,5 phút)" },
+};
+$("#mStyle").onchange = () => {
+  const st = $("#mStyle").value;
+  $("#mMashHint").classList.toggle("hidden", st !== "mashup");
+  $("#mFadeBox").classList.toggle("hidden", st === "mashup");
+  [...$("#mCount").options].forEach((o) => { o.textContent = COUNT_LABEL[st][o.value]; });
+  if (st === "mashup" && +$("#mCount").value < 20) $("#mCount").value = "20";
+};
+
+function showUsed() {
+  const n = MOPT?.used?.[$("#mVersion").value] || 0;
+  $("#mUsed").textContent = n ? `(đã dùng ${n} bài)` : "";
+}
+
+async function createMix(auto) {
+  $("#mErr").textContent = "";
+  try {
+    const r = await api("/api/mixes", json("POST", {
+      country: $("#mCountry").value, genre: $("#mGenre").value, version: $("#mVersion").value, count: +$("#mCount").value,
+      style: $("#mStyle").value,
+      fade: +$("#mFade").value, period: $("#mPeriod").value, free: $("#mFree").checked, fresh: $("#mFresh").checked, auto }));
+    location.hash = `#/m/${r.mix.id}`;
+  } catch (e) { $("#mErr").textContent = e.message; }
+}
+$("#mAutoBtn").onclick = () => createMix(true);
+$("#mFindBtn").onclick = () => createMix(false);
+
+async function showMix(id) {
+  V = null;
+  showPage("mixEditor", "music", "Ghép nhạc");
+  $("#mYt").src = ""; $("#mPlayerHint").classList.remove("hidden");
+  $("#mAddErr").textContent = ""; $("#mNote").textContent = "";
+  renderMix(await api(`/api/mixes/${id}`));
+  pollMix();
+}
+
+function renderMix(r) {
+  M = r;
+  const m = r.mix, busy = r.job && !r.job.done;
+  $("#mInfo").textContent = `· ${r.tracks.length} bài · dài khoảng ${fmt(r.total)}`;
+  $("#mFadeEdit").value = m.fade;
+  const mash = m.style === "mashup";
+  $$(".mFadeEditBox").forEach((x) => x.classList.toggle("hidden", mash));
+  $("#mStyleInfo").textContent = mash ? `🔥 Mashup: điệp khúc 8 nhịp mỗi bài, nối khớp nhịp${m.bpm_groups?.length ? ` · nhịp ${m.bpm_groups.join(" → ")} BPM` : ""}. App xếp các bài theo nhóm nhịp từ chậm đến nhanh khi dựng.` : "";
+  $("#mBgDel").classList.toggle("hidden", !m.bg);
+  $("#mBgPrev").classList.toggle("hidden", !m.bg);
+  if (m.bg) $("#mBgPrev").src = `/api/mixes/${m.id}/files/${m.bg.replace("?", "?v=")}`;
+  const box = $("#mTracks");
+  box.innerHTML = r.tracks.length ? "" : `<p class="hint">${busy ? "Đang tìm bài…" : "Chưa có bài nào."}</p>`;
+  r.tracks.forEach((t, i) => {
+    const d = document.createElement("div");
+    d.className = "track"; d.dataset.id = t.id;
+    d.innerHTML = `<span class="num">${i + 1}</span>
+      <img loading="lazy" src="/api/music/cover/${t.id}" alt="">
+      <div class="name"><span class="song" contenteditable="plaintext-only" spellcheck="false" title="Bấm để sửa tên bài">${esc(t.song)}</span>
+        <span class="artist" contenteditable="plaintext-only" spellcheck="false" title="Bấm để sửa tên ca sĩ">${esc(t.artist) || "—"}</span>
+        <span class="meta">${t.rank ? `#${t.rank} hot · ` : ""}${views(t.views)} view · ${fmt(t.duration)} · ${esc(t.channel)}</span></div>
+      <div class="ctl"><button class="mini" data-a="play" title="Nghe thử">▶</button><button class="mini" data-a="up" title="Lên">↑</button>
+        <button class="mini" data-a="down" title="Xuống">↓</button><button class="mini danger" data-a="del" title="Bỏ bài">✕</button></div>`;
+    d.querySelector(".song").onblur = (e) => e.target.textContent.trim() !== t.song && mixEdit({ track: t.id, song: e.target.textContent });
+    d.querySelector(".artist").onblur = (e) => {
+      const v = e.target.textContent.trim(); if (v !== (t.artist || "—")) mixEdit({ track: t.id, artist: v === "—" ? "" : v });
+    };
+    d.querySelectorAll("[contenteditable]").forEach((el) => el.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); el.blur(); } });
+    d.querySelectorAll("[data-a]").forEach((b) => b.onclick = () => trackAction(b.dataset.a, i, t));
+    box.appendChild(d);
+  });
+  showMixOut();
+}
+
+async function mixEdit(o) {
+  try { renderMix(await api(`/api/mixes/${M.mix.id}`, json("PUT", o))); }
+  catch (e) { alert(e.message); }
+}
+
+function trackAction(a, i, t) {
+  const order = M.tracks.map((x) => x.id);
+  if (a === "play") {
+    $("#mYt").src = `https://www.youtube.com/embed/${t.id}?autoplay=1`;
+    $("#mPlayerHint").classList.add("hidden");
+    $$(".track").forEach((x) => x.classList.toggle("playing", x.dataset.id === t.id));
+    return;
+  }
+  if (a === "del") order.splice(i, 1);
+  else {
+    const j = a === "up" ? i - 1 : i + 1;
+    if (j < 0 || j >= order.length) return;
+    [order[i], order[j]] = [order[j], order[i]];
+  }
+  mixEdit({ order });
+}
+
+$("#mFadeEdit").onchange = () => mixEdit({ fade: +$("#mFadeEdit").value });
+$("#mAddBtn").onclick = async () => {
+  const url = $("#mAddUrl").value.trim();
+  if (!url) return;
+  $("#mAddBtn").disabled = true; $("#mAddErr").textContent = "";
+  try { renderMix(await api(`/api/mixes/${M.mix.id}/tracks`, json("POST", { url }))); $("#mAddUrl").value = ""; }
+  catch (e) { $("#mAddErr").textContent = e.message; }
+  $("#mAddBtn").disabled = false;
+};
+$("#mBg").onchange = async () => {
+  const f = $("#mBg").files[0];
+  if (!f) return;
+  const fd = new FormData(); fd.append("file", f);
+  $("#mBg").value = "";
+  try { renderMix(await api(`/api/mixes/${M.mix.id}/bg`, { method: "POST", body: fd })); }
+  catch (e) { alert(e.message); }
+};
+$("#mBgDel").onclick = async () => renderMix(await api(`/api/mixes/${M.mix.id}/bg`, { method: "DELETE" }));
+$("#mMoreBtn").onclick = async () => {
+  try { await api(`/api/mixes/${M.mix.id}/more`, { method: "POST" }); pollMix(); } catch (e) { alert(e.message); }
+};
+$("#mTitle").onchange = () => mixEdit({ title: $("#mTitle").value });
+$("#mBuildBtn").onclick = async () => {
+  try {
+    await api(`/api/mixes/${M.mix.id}/build`, { method: "POST" });
+    pollMix();
+  } catch (e) { alert(e.message); }
+};
+$("#mCancelBtn").onclick = () => api(`/api/mixes/${M.mix.id}/cancel`, { method: "POST" });
+$("#mDelBtn").onclick = async () => {
+  if (!confirm("Xoá bản mix này cùng video đã dựng?")) return;
+  await api(`/api/mixes/${M.mix.id}`, { method: "DELETE" });
+  location.hash = "#/music";
+};
+
+function showMixOut() {
+  const m = M.mix, ok = M.output, base = `/api/mixes/${m.id}/files/`;
+  $("#mOut").classList.toggle("hidden", !ok);
+  $("#mBuildBtn").textContent = m.output_stamp ? "🎬 Dựng lại" : "🎬 Dựng video";
+  if (!ok) return;
+  if (!$("#mVideo").src.includes(m.output_stamp)) $("#mVideo").src = `${base}output.mp4?v=${m.output_stamp}`;
+  $("#mThumb").src = `${base}thumbnail.jpg?v=${m.output_stamp}`;
+  $("#mThumbA").href = `${base}thumbnail.jpg?download=1`;
+  $("#mDl").href = `${base}output.mp4?download=1`;
+  const y = m.youtube || {};
+  if (document.activeElement !== $("#mTitle")) $("#mTitle").value = y.title || "";
+  $("#mDesc").value = y.description || ""; $("#mTags").value = y.tags || "";
+}
+
+function pollMix() {
+  clearTimeout(mPoll);
+  const id = M.mix.id;
+  let stage = "";
+  const tick = async () => {
+    if (!M || M.mix.id !== id || !location.hash.startsWith("#/m/")) return;
+    const r = await api(`/api/mixes/${id}`).catch(() => null);
+    if (!r) return;
+    const job = r.job, busy = job && !job.done, find = job?.kind === "find", pct = Math.round((job?.progress || 0) * 100);
+    $("#mScanBox").classList.toggle("hidden", !(find && (busy || job.error)));
+    $("#mScanProg div").style.width = $("#mProg div").style.width = `${pct}%`;
+    $("#mProg").classList.toggle("hidden", !(busy && !find));
+    $("#mCancelBtn").classList.toggle("hidden", !busy);
+    $("#mBuildBtn").disabled = $("#mMoreBtn").disabled = $("#mAddBtn").disabled = !!busy;
+    const note = find ? $("#mScanNote") : $("#mNote");
+    if (busy) {
+      note.className = "note";
+      note.textContent = (job.kind === "auto" ? "⚡ " : "") + `${job.stage || "Đang chuẩn bị"}… ${pct}%`;
+      if (job.stage !== stage) { stage = job.stage; renderMix(r); }
+      mPoll = setTimeout(tick, 1500);
+      return;
+    }
+    renderMix(r);
+    if (!job) return;
+    if (job.error) { note.className = "note bad"; note.textContent = "Lỗi: " + job.error; return; }
+    const x = job.result || {};
+    if (find) { $("#mScanBox").classList.add("hidden"); return; }
+    note.className = "note ok";
+    note.textContent = `Xong! ${x.songs} bài, dài ${fmt(x.duration)}.` + (x.failed ? ` ${x.failed} bài không tải được nên đã bỏ.` : "");
+  };
+  tick();
+}
+
 function route() {
-  const h = location.hash, m = h.match(/^#\/p\/(\w+)/);
+  const h = location.hash, m = h.match(/^#\/p\/(\w+)/), mx = h.match(/^#\/m\/(\w+)/);
   if (m) showEditor(m[1]).catch((e) => { alert(e.message); location.hash = ""; });
+  else if (mx) showMix(mx[1]).catch((e) => { alert(e.message); location.hash = "#/music"; });
+  else if (h.startsWith("#/music")) showMusic();
   else if (h.startsWith("#/trends")) showTrends();
+  else if (h.startsWith("#/shorts")) showShorts();
   else if (h.startsWith("#/channels")) showChannels();
   else if (h.startsWith("#/settings")) showSettings();
   else if (h.startsWith("#/projects")) showProjects();

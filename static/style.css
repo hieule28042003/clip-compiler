@@ -87,7 +87,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   color: var(--text); text-decoration: none; }
 .proj:hover { border-color: var(--accent); }
 
-#editor { display: grid; grid-template-columns: minmax(0, 1fr) 520px; gap: 24px; align-items: start; }
+#editor, #mixEditor { display: grid; grid-template-columns: minmax(0, 1fr) 520px; gap: 24px; align-items: start; }
 .side { position: sticky; top: 12px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px;
   max-height: calc(100vh - 24px); overflow: auto; }
 .player { position: relative; aspect-ratio: 16 / 9; background: #000; border-radius: 10px; overflow: hidden; }
@@ -128,7 +128,7 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 20px 0; }
   .trendForm { grid-template-columns: 1fr; }
 }
 @media (max-width: 1100px) {
-  #editor { grid-template-columns: 1fr; }
+  #editor, #mixEditor { grid-template-columns: 1fr; }
   .side { position: static; max-height: none; }
   .clip { grid-template-columns: 32px 120px minmax(0, 1fr); }
   .clip img { width: 120px; }
@@ -208,3 +208,43 @@ details summary { cursor: pointer; color: var(--accent); margin: 4px 0 8px; }
 .statsBox .tblWrap { overflow-x: auto; max-width: 100%; }
 .statsBox .vids td:first-child { min-width: 180px; }
 .statsBox a { color: var(--accent); }
+#editor.shortsMode .longOnly, #editor:not(.shortsMode) .shortsOnly { display: none !important; }
+
+/* phân tích xu hướng */
+.anaGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; margin-top: 14px; }
+.anaGrid .card { padding: 14px 16px; min-width: 0; }
+.tips { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 6px; font-size: 14px; }
+.bar { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; margin-top: 8px; font-size: 13px; }
+.bar .track { grid-column: 1 / -1; height: 6px; background: #0b0d12; border-radius: 4px; overflow: hidden; }
+.bar .track div { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); }
+.bar.lead span:first-child { color: var(--accent); font-weight: 600; }
+.rise .why { margin: 0; padding-left: 18px; font-size: 13px; color: #c9ccd6; display: grid; gap: 3px; }
+.rise img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 8px; display: block; }
+.rise .ttl { font-weight: 600; overflow-wrap: anywhere; }
+.badge { display: inline-block; font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 10px; background: #2a2114; color: var(--accent); }
+
+/* 🎵 ghép nhạc */
+.mt { margin-top: 18px; }
+.track { display: grid; grid-template-columns: 34px 120px minmax(0, 1fr) auto; gap: 12px; align-items: center;
+  background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px; }
+.track.playing { border-color: var(--accent); }
+.track .num { font-weight: 700; color: var(--accent); text-align: center; }
+.track img { width: 120px; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 8px; background: #000; display: block; }
+.track .name { display: grid; gap: 2px; min-width: 0; }
+.track [contenteditable] { outline: none; border-radius: 4px; padding: 0 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.track [contenteditable]:focus { background: #11141b; box-shadow: 0 0 0 1px var(--accent); white-space: normal; }
+.track .song { font-weight: 700; }
+.track .artist { color: #c9ccd6; font-size: 13px; }
+.track .meta { color: var(--dim); font-size: 12px; padding: 0 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.track .ctl { display: flex; gap: 4px; }
+.addRow input { flex: 1; min-width: 200px; }
+.fileBtn { display: inline-flex; align-items: center; cursor: pointer; background: #252a37; border: 1px solid var(--line); border-radius: 9px; }
+.fileBtn:hover { border-color: var(--accent); }
+.bgPrev { height: 44px; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 6px; }
+.fullImg { width: 100%; border-radius: 8px; display: block; }
+#mVideo { width: 100%; border-radius: 10px; background: #000; margin-top: 10px; }
+@media (max-width: 700px) {
+  .track { grid-template-columns: 26px 84px minmax(0, 1fr); }
+  .track img { width: 84px; }
+  .track .ctl { grid-column: 2 / -1; }
+}

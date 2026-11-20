@@ -13,6 +13,8 @@
   <a href="#/" class="brand">🎞 <span>Ghép Khoảnh Khắc Hay</span></a>
   <nav class="menu">
     <a href="#/" data-nav="home"><i>➕</i><span>Tạo video ghép</span></a>
+    <a href="#/shorts" data-nav="shorts"><i>✂</i><span>Làm Shorts</span></a>
+    <a href="#/music" data-nav="music"><i>🎵</i><span>Ghép nhạc</span></a>
     <a href="#/trends" data-nav="trends"><i>🔥</i><span>Xu hướng</span></a>
     <a href="#/projects" data-nav="projects"><i>📁</i><span>Dự án</span></a>
     <a href="#/channels" data-nav="channels"><i>📺</i><span>Kênh YouTube</span></a>
@@ -33,18 +35,28 @@
     <div class="seedNote hidden" id="seedNote"></div>
     <p class="hint">App tìm video trên YouTube theo từ khoá, đọc biểu đồ <b>“Most replayed”</b> và các bình luận có mốc giờ
       (“2:15 😂😂”) để tìm đoạn gây cười, rồi ghép thành video 10–20 phút có số thứ tự, ghi nguồn và phần bình luận của bạn.</p>
-    <label class="lbl">Từ khoá (nên dùng tiếng Anh để có nhiều video hơn)</label>
-    <input id="kw" placeholder="vd: celebrity funny moments, talk show bloopers, kevin hart funny">
+    <label class="lbl">Lấy đoạn từ</label>
+    <select id="src">
+      <option value="kw">🔎 Video trên YouTube theo từ khoá</option>
+      <option value="stream">📺 Các buổi livestream (dán link): ghép các đoạn hay nhất thành một video dài</option>
+    </select>
+    <p class="hint hidden" id="srcStreamHint">Dán 1–10 link buổi stream (bản phát lại, mỗi link một dòng). App đọc <b>chat phát lại</b>,
+      <b>độ to âm thanh</b>, “Most replayed” và bình luận có mốc giờ của từng buổi để tìm đoạn hay, rồi ghép theo thứ tự thời gian
+      (không đánh số), mỗi đoạn có chương ghi mốc giờ trong stream. Mỗi buổi 4–5 giờ quét mất khoảng 2–4 phút.</p>
+    <div id="kwBox"><label class="lbl">Từ khoá (nên dùng tiếng Anh để có nhiều video hơn)</label>
+    <input id="kw" placeholder="vd: celebrity funny moments, talk show bloopers, kevin hart funny"></div>
+    <div id="streamsBox" class="hidden"><label class="lbl">Link các buổi stream (mỗi dòng một link)</label>
+    <textarea id="streams" rows="4" placeholder="https://www.youtube.com/watch?v=…&#10;https://youtu.be/…"></textarea></div>
     <div class="three">
-      <div><span class="hint">Số video quét</span>
+      <div id="nVideosBox"><span class="hint">Số video quét</span>
         <select id="nVideos"><option value="20">20 video (~1 phút)</option><option value="40" selected>40 video (~2 phút)</option><option value="60">60 video (~3 phút)</option></select></div>
       <div><span class="hint">Mỗi đoạn dài</span>
-        <select id="clipLen"><option value="6">6 giây</option><option value="8">8 giây</option><option value="10" selected>10 giây</option><option value="12">12 giây</option><option value="15">15 giây</option></select></div>
+        <select id="clipLen"><option value="6">6 giây</option><option value="8">8 giây</option><option value="10" selected>10 giây</option><option value="12">12 giây</option><option value="15">15 giây</option><option value="30" class="streamOpt" hidden>30 giây</option><option value="45" class="streamOpt" hidden>45 giây</option><option value="60" class="streamOpt" hidden>60 giây</option></select></div>
       <div><span class="hint">Video dài khoảng</span>
-        <select id="minutes"><option value="10">10 phút</option><option value="15" selected>15 phút</option><option value="20">20 phút</option></select></div>
+        <select id="minutes"><option value="10">10 phút</option><option value="15" selected>15 phút</option><option value="20">20 phút</option><option value="30" class="streamOpt" hidden>30 phút</option></select></div>
     </div>
-    <label class="check"><input type="checkbox" id="useComments" checked> Đọc bình luận để tìm mốc gây cười (chính xác hơn, chậm hơn một chút)</label>
-    <label class="check"><input type="checkbox" id="voiceover" checked> 🎙 Lời bình bằng giọng đọc tự động cho 3 đoạn top
+    <label class="check" id="useCommentsBox"><input type="checkbox" id="useComments" checked> Đọc bình luận để tìm mốc gây cười (chính xác hơn, chậm hơn một chút)</label>
+    <label class="check" id="voiceoverBox"><input type="checkbox" id="voiceover" checked> 🎙 Lời bình bằng giọng đọc tự động cho 3 đoạn top
       <select id="voice" class="inline"><option value="en-US-AndrewNeural">Andrew (nam, Mỹ)</option><option value="en-US-AvaNeural">Ava (nữ, Mỹ)</option><option value="en-US-BrianNeural">Brian (nam, Mỹ, trẻ)</option><option value="en-GB-RyanNeural">Ryan (nam, Anh)</option></select></label>
     <label class="check"><input type="checkbox" id="shorts" checked> ✂ Cắt thêm 3 Shorts dọc từ các đoạn hay nhất</label>
     <div class="row">
@@ -54,8 +66,56 @@
     <p class="hint">⚡ <b>Làm tự động</b>: bấm một lần, khoảng 10–25 phút sau có sẵn video, thumbnail, tiêu đề, mô tả, tag và Shorts.
       Vẫn mở dự án ra chỉnh và dựng lại được.</p>
     <p class="err" id="createErr"></p>
-    <div class="warn">⚠ Các đoạn là video của người khác. Đăng lên YouTube có thể bị Content ID nhận ra (chặn tiếng, lấy doanh thu,
+    <div class="warn" id="kwWarn">⚠ Các đoạn là video của người khác. Đăng lên YouTube có thể bị Content ID nhận ra (chặn tiếng, lấy doanh thu,
       gậy bản quyền). Đoạn ngắn + bình luận của chính bạn sau mỗi đoạn giúp video mang tính <b>biến đổi</b> hơn, nhưng không đảm bảo an toàn.</div>
+    <div class="warn hidden" id="streamWarn">⚠ Chỉ dùng stream <b>của chính bạn</b>, hoặc của streamer cho phép làm video tổng hợp / clip.
+      Ghép stream người khác khi chưa được phép dễ bị gỡ video và nhận gậy bản quyền. App tự ghi nguồn từng buổi stream trong mô tả.</div>
+  </section>
+</main>
+
+<main id="shortsPage" class="page hidden">
+  <section class="card narrow">
+    <h2>✂ Làm Shorts</h2>
+    <p class="hint">Chỉ làm video dọc 1080x1920 cho YouTube Shorts, không dựng video dài. App tìm đoạn gây cười nhất
+      (biểu đồ “Most replayed” + bình luận có mốc giờ), mỗi video gốc lấy 1 đoạn, rồi cắt dọc kèm câu hook to phía trên,
+      phụ đề và nút “FOLLOW FOR MORE”. Mỗi Short có sẵn tiêu đề, mô tả (ghi nguồn) và tag.</p>
+    <label class="lbl">Kiểu Short</label>
+    <select id="sStyle">
+      <option value="moment">✂ Khoảnh khắc hay nhất: câu hook to + phụ đề</option>
+      <option value="reply">💬 Trả lời bình luận hài: khung bình luận + đúng đoạn được nhắc + câu đáp có giọng đọc</option>
+      <option value="stream">📺 Cắt từ một buổi stream dài: nhiều Shorts từ các đoạn hay nhất của đúng video đó</option>
+    </select>
+    <p class="hint hidden" id="sStreamHint">Dán link buổi stream (YouTube, bản phát lại / VOD, dài vài giờ cũng được). App đọc
+      <b>chat phát lại</b> (chỗ chat dồn dập, nhiều “=))”, “vãi”, 😂…), <b>độ to âm thanh</b> (streamer hét, cười to),
+      biểu đồ “Most replayed” và bình luận có mốc giờ, rồi cắt mỗi đoạn hay thành một Short; đầu và cuối đoạn rơi vào chỗ ngắt lời.
+      Stream 4–5 giờ mất khoảng 2–4 phút để quét. Hook to phía trên lấy từ câu chat nhiều người gõ nhất trong đoạn.</p>
+    <p class="hint hidden" id="sReplyHint">App lấy các bình luận nhiều like, có 😂💀 / lol… và nhắc mốc giờ trong video gốc
+      (“3:12 the way he…”), cắt đúng đoạn đó, hiện khung “Reply to @tên's comment” (tên đầy đủ, emoji trong bình luận bị bỏ)
+      và đọc câu đáp ngắn bằng giọng ở trang Tạo video ghép. App không tự hiểu được câu nào hài: nên bấm “Tìm đoạn &amp; tự duyệt”
+      để xem và bỏ bình luận không hợp.</p>
+    <div id="sKwBox"><label class="lbl">Từ khoá (nên dùng tiếng Anh)</label>
+    <input id="sKw" placeholder="vd: trump funny moments, kevin hart interview, cat fails"></div>
+    <div id="sStreamBox" class="hidden"><label class="lbl">Link buổi stream</label>
+    <input id="sStream" placeholder="vd: https://www.youtube.com/watch?v=… hoặc youtube.com/live/…"></div>
+    <div class="three">
+      <div><span class="hint">Số Shorts</span>
+        <select id="sCount"><option value="3">3 Shorts</option><option value="5" selected>5 Shorts</option><option value="8">8 Shorts</option><option value="10">10 Shorts</option><option value="15" class="streamOpt" hidden>15 Shorts</option><option value="20" class="streamOpt" hidden>20 Shorts</option></select></div>
+      <div><span class="hint">Mỗi Short dài</span>
+        <select id="sLen"><option value="10">10 giây</option><option value="15">15 giây</option><option value="20" selected>20 giây</option><option value="30">30 giây</option><option value="45" class="streamOpt" hidden>45 giây</option><option value="60" class="streamOpt" hidden>60 giây</option></select></div>
+      <div id="sVideosBox"><span class="hint">Số video quét</span>
+        <select id="sVideos"><option value="20">20 video</option><option value="40" selected>40 video</option><option value="60">60 video</option></select></div>
+    </div>
+    <div class="row">
+      <button id="sAutoBtn" class="primary big" title="Quét, chọn đoạn, cắt Shorts — không cần duyệt">⚡ Làm Shorts tự động</button>
+      <button id="sCreateBtn" class="big">🔎 Tìm đoạn &amp; tự duyệt</button>
+    </div>
+    <p class="hint">⚡ Khoảng 3–8 phút là xong. Muốn tự đăng lên kênh: ở tab 📺 Kênh YouTube bỏ tick “🎬 Đăng video dài”,
+      kênh sẽ chỉ làm Shorts.</p>
+    <p class="err" id="sErr"></p>
+    <div class="warn" id="sWarn">⚠ Các đoạn là video của người khác, có thể bị Content ID nhận ra khi đăng lên YouTube.</div>
+    <div class="warn hidden" id="sStreamWarn">⚠ Chỉ cắt stream <b>của chính bạn</b>, hoặc của streamer cho phép làm clip
+      (nhiều streamer có chương trình “clipper” / ghi rõ cho phép trong mô tả kênh). Cắt stream người khác khi chưa được phép
+      dễ bị gỡ video và nhận gậy bản quyền. App tự ghi nguồn (tên kênh + link stream) trong mô tả mỗi Short.</div>
   </section>
 </main>
 
@@ -69,11 +129,14 @@
 <main id="trends" class="page hidden">
   <section class="card">
     <h2>🔥 Nghiên cứu xu hướng</h2>
-    <p class="hint">Lấy từ khoá người xem đang gõ trên YouTube, đo độ hot bằng các video đăng <b>trong tháng này</b> có nhiều view nhất,
-      rồi tìm chủ đề / người nổi tiếng đang được xem nhiều. Bấm <b>“Tạo video tương tự”</b> để làm video tổng hợp về chủ đề đó
-      (app quét chính các video đang hot trước).</p>
+    <p class="hint">Lấy từ khoá người xem đang gõ trên YouTube, đo độ hot bằng các video đăng <b>trong 7 / 30 ngày qua</b> có nhiều
+      view nhất, tìm chủ đề / người nổi tiếng đang được xem nhiều, rồi <b>phân tích</b> cái gì đang ăn khách (Shorts hay video dài,
+      độ dài, kiểu tiêu đề, ngày đăng) và các <b>video đang lên nhanh</b>. Bấm <b>“Làm tương tự”</b> để làm video tổng hợp cùng
+      chủ đề (app quét chính các video đang hot đó trước).</p>
     <div class="trendForm">
       <div><span class="hint">Lĩnh vực</span><input id="seed" value="funny moments" placeholder="vd: funny moments, celebrity funny moments"></div>
+      <div><span class="hint">Khoảng thời gian</span>
+        <select id="period"><option value="week">7 ngày qua</option><option value="month" selected>30 ngày qua</option></select></div>
       <div><span class="hint">Độ sâu</span>
         <select id="depth"><option value="8">Nhanh · 8 từ khoá</option><option value="12" selected>Vừa · 12 từ khoá</option><option value="20">Kỹ · 20 từ khoá</option></select></div>
       <button id="trendBtn" class="primary">🔥 Tìm chủ đề hot</button>
@@ -83,6 +146,22 @@
     <p class="note" id="trendNote"></p>
   </section>
   <div id="trendOut" class="hidden">
+    <section id="anaBox" class="hidden">
+      <h2 class="mt">📊 Phân tích <span class="hint" id="anaAt"></span></h2>
+      <div class="card"><b>Nên làm gì</b><ul id="anaTips" class="tips"></ul></div>
+      <div class="anaGrid">
+        <div class="card"><b>Định dạng</b><div id="anaFormat"></div></div>
+        <div class="card"><b>Độ dài video dài</b><div id="anaLen"></div></div>
+        <div class="card"><b>Công thức tiêu đề</b><p class="hint">View trung vị khi tiêu đề có / không có đặc điểm này</p><div id="anaFeat"></div></div>
+        <div class="card"><b>Ngày giờ đăng</b><div id="anaDays"></div></div>
+        <div class="card"><b>Kênh nổi bật</b><div id="anaCh"></div></div>
+      </div>
+      <h2 class="mt">🚀 Video đang lên: làm tương tự</h2>
+      <p class="hint">Xếp theo view mỗi ngày và độ “vượt sức” kênh (view gấp nhiều lần số sub = nhờ nội dung, kênh mới cũng làm được).
+        “Làm tương tự” tạo video tổng hợp cùng chủ đề, quét video này và các video hot cùng từ khoá trước. App chỉ ghép
+        khoảnh khắc từ video có sẵn, không dựng lại nội dung gốc.</p>
+      <div id="rising" class="topics"></div>
+    </section>
     <h2 class="mt">Chủ đề đang hot <span class="hint" id="trendAt"></span></h2>
     <div id="topics" class="topics"></div>
     <h2 class="mt">Từ khoá đang được tìm</h2>
@@ -184,6 +263,114 @@
   </section>
 </main>
 
+<main id="musicPage" class="page hidden">
+  <section class="card narrow">
+    <h2>🎵 Ghép nhạc thành video dài</h2>
+    <p class="hint">App lấy danh sách <b>bài hot nhất</b> của nước và thể loại bạn chọn. Có hai chế độ:
+      <b>mọi thời điểm</b> (video bài hát nhiều view nhất từ trước tới nay, cộng thêm bảng xếp hạng iTunes hiện tại)
+      hoặc <b>đang hot</b> 7 / 30 ngày qua. Sau đó app tìm đúng <b>phiên bản</b> bạn chọn của từng bài:
+      bản gốc, remix, chill / lofi, acoustic hay piano. Ví dụ chọn Remix thì app lấy bản remix nhiều view nhất của từng bài hot.
+      Bài đã dùng ở các bản mix trước sẽ không lặp lại. Tiếng các bài được chỉnh to nhỏ đều nhau và nối bằng crossfade.
+      Hình chạy suốt video gồm ảnh bìa, <b>danh sách tất cả các bài</b> (bài đang phát được tô sáng), sóng nhạc và thanh tiến độ.</p>
+    <label class="lbl">Kiểu video</label>
+    <select id="mStyle">
+      <option value="playlist">🎧 Playlist: phát cả bài, nối crossfade (video 30 phút – 2 giờ)</option>
+      <option value="mashup">🔥 Mashup / Megamix: điệp khúc từng bài, cùng nhịp, nối đúng phách (video 5–15 phút)</option>
+    </select>
+    <p class="hint hidden" id="mMashHint">App lấy đoạn điệp khúc (quanh đoạn “Most replayed” của YouTube) dài 8 nhịp của mỗi bài,
+      đo nhịp (BPM), đưa tất cả về cùng một nhịp (không đổi tông) rồi nối chồng đúng 2 phách, nghe liền như DJ mix.
+      Nên chọn các bài có nhịp gần nhau (cùng thể loại / phiên bản Remix) cho mượt.</p>
+    <div class="three">
+      <div><span class="hint">Quốc gia</span><select id="mCountry"></select></div>
+      <div><span class="hint">Thể loại</span><select id="mGenre"></select></div>
+      <div><span class="hint">Phiên bản</span><select id="mVersion"></select></div>
+    </div>
+    <div class="three">
+      <div><span class="hint">Lấy bài</span>
+        <select id="mPeriod"><option value="all" selected>🏆 Hot nhất mọi thời điểm</option><option value="month">📈 Đang hot 30 ngày qua</option><option value="week">📈 Đang hot 7 ngày qua</option></select></div>
+      <div><span class="hint">Số bài</span>
+        <select id="mCount"><option value="10">10 bài (~35 phút)</option><option value="15" selected>15 bài (~50 phút)</option><option value="20">20 bài (~1 giờ 10)</option><option value="30">30 bài (~1 giờ 45)</option></select></div>
+      <div id="mFadeBox"><span class="hint">Chuyển bài</span>
+        <select id="mFade"><option value="0">Nối liền</option><option value="2">Crossfade 2 giây</option><option value="3" selected>Crossfade 3 giây</option><option value="5">Crossfade 5 giây</option><option value="8">Crossfade 8 giây</option></select></div>
+    </div>
+    <label class="check"><input type="checkbox" id="mFresh" checked> Không lặp bài: bỏ các bài đã dùng ở bản mix trước (cùng phiên bản) <span class="hint" id="mUsed"></span></label>
+    <label class="check"><input type="checkbox" id="mFree"> Chỉ lấy nhạc không bản quyền (NCS, no copyright…), dùng an toàn hơn nhưng không phải bài hot</label>
+    <div class="row">
+      <button id="mAutoBtn" class="primary big">⚡ Tìm bài &amp; dựng luôn</button>
+      <button id="mFindBtn" class="big">🔎 Tìm bài &amp; tự duyệt</button>
+    </div>
+    <p class="err" id="mErr"></p>
+    <div class="warn">⚠ <b>Bài hát thương mại gần như chắc chắn bị Content ID nhận ra.</b> Khi đó tiền quảng cáo thuộc về chủ bài hát,
+      video có thể bị chặn ở một số nước. Một số hãng còn gỡ video và gửi <b>gậy bản quyền</b> (3 gậy là kênh bị xoá).
+      Nên đăng thử ở chế độ Không công khai và xem YouTube Studio báo gì trước khi công khai.
+      Kiểu video này hợp nhất với nhạc bạn tự làm, nhạc mua bản quyền hoặc nhạc không bản quyền.</div>
+  </section>
+  <section class="card narrow mt">
+    <h2>Bản mix đã tạo</h2>
+    <div id="mixes" class="projects"><p class="hint">Chưa có bản mix nào.</p></div>
+  </section>
+</main>
+
+<main id="mixEditor" class="page hidden">
+  <section>
+    <div class="scanBox hidden" id="mScanBox">
+      <p id="mScanNote" class="note"></p>
+      <div class="progress" id="mScanProg"><div></div></div>
+    </div>
+    <div class="listHead">
+      <h2>Danh sách bài <span id="mInfo" class="hint"></span></h2>
+      <div class="row">
+        <button id="mMoreBtn" class="mini">🔎 Tìm thêm bài</button>
+      </div>
+    </div>
+    <p class="hint">Bấm ↑ ↓ để đổi thứ tự, bấm ✕ để bỏ bài không hợp. Bấm vào tên bài hoặc tên ca sĩ để sửa (tên này hiện trong video và mô tả).</p>
+    <div class="row addRow">
+      <input id="mAddUrl" placeholder="Thêm bài bằng link YouTube: https://www.youtube.com/watch?v=…">
+      <button id="mAddBtn" class="mini">➕ Thêm</button>
+    </div>
+    <p class="err" id="mAddErr"></p>
+    <div id="mTracks" class="clips"></div>
+  </section>
+
+  <aside class="side">
+    <div class="player"><iframe id="mYt" title="Nghe thử" allow="autoplay; encrypted-media" allowfullscreen></iframe>
+      <div class="playerHint" id="mPlayerHint">Bấm ▶ ở một bài để nghe thử</div></div>
+    <p class="hint" id="mStyleInfo"></p>
+    <label class="lbl mFadeEditBox">Chuyển bài</label>
+    <select id="mFadeEdit" class="mFadeEditBox"><option value="0">Nối liền</option><option value="2">Crossfade 2 giây</option><option value="3">Crossfade 3 giây</option><option value="5">Crossfade 5 giây</option><option value="8">Crossfade 8 giây</option></select>
+    <label class="lbl">Ảnh nền <span class="hint">(không chọn thì app ghép ảnh bìa các bài)</span></label>
+    <div class="row">
+      <label class="mini fileBtn">🖼 Chọn ảnh<input type="file" id="mBg" accept="image/*" hidden></label>
+      <button id="mBgDel" class="mini hidden">Bỏ ảnh nền</button>
+      <img id="mBgPrev" class="bgPrev hidden" alt="Ảnh nền">
+    </div>
+    <div class="row">
+      <button id="mBuildBtn" class="primary big">🎬 Dựng video</button>
+      <button id="mCancelBtn" class="hidden">Huỷ</button>
+    </div>
+    <div class="progress hidden" id="mProg"><div></div></div>
+    <p class="note" id="mNote"></p>
+    <div id="mOut" class="hidden">
+      <video id="mVideo" controls playsinline preload="metadata"></video>
+      <label class="lbl">Thumbnail <span class="hint">(bấm để tải)</span></label>
+      <a id="mThumbA"><img id="mThumb" class="fullImg" alt="Thumbnail"></a>
+      <div class="row">
+        <a id="mDl" class="link primary">⬇ Tải video</a>
+        <a class="link" href="https://studio.youtube.com" target="_blank" rel="noopener">YouTube Studio ↗</a>
+      </div>
+      <label class="lbl">Tiêu đề YouTube <button class="mini" data-copy="mTitle">Copy</button></label>
+      <input id="mTitle">
+      <p class="hint">Sửa được trực tiếp, app tự lưu. Xoá trống thì app tự viết lại.</p>
+      <label class="lbl">Mô tả (mốc giờ từng bài + nguồn) <button class="mini" data-copy="mDesc">Copy</button></label>
+      <textarea id="mDesc" rows="12"></textarea>
+      <label class="lbl">Tag <button class="mini" data-copy="mTags">Copy</button></label>
+      <textarea id="mTags" rows="3"></textarea>
+    </div>
+    <hr>
+    <button id="mDelBtn" class="danger">Xoá bản mix</button>
+  </aside>
+</main>
+
 <main id="editor" class="page hidden">
   <section>
     <div class="scanBox hidden" id="scanBox">
@@ -194,14 +381,16 @@
     <div class="listHead">
       <h2>Danh sách dựng <span id="planInfo" class="hint"></span></h2>
       <div class="row">
-        <span class="hint">Tự chọn đủ</span>
-        <select id="autoMin" style="width:auto"><option value="10">10 phút</option><option value="15">15 phút</option><option value="20">20 phút</option></select>
+        <span class="hint longOnly">Tự chọn đủ</span>
+        <select id="autoCount" class="shortsOnly" style="width:auto"><option value="3">3 Shorts</option><option value="5">5 Shorts</option><option value="8">8 Shorts</option><option value="10">10 Shorts</option><option value="15" class="streamOpt" hidden>15 Shorts</option><option value="20" class="streamOpt" hidden>20 Shorts</option></select>
+        <select id="autoMin" class="longOnly" style="width:auto"><option value="10">10 phút</option><option value="15">15 phút</option><option value="20">20 phút</option><option value="30" class="streamOpt" hidden>30 phút</option></select>
         <button id="autoBtn" class="mini">Tự chọn lại</button>
         <button id="moreBtn" class="mini">🔎 Quét thêm 20 video</button>
       </div>
     </div>
     <p class="warn hidden" id="shortWarn"></p>
-    <p class="hint">Đoạn cuối là <b>#1</b> (hay nhất). Bấm ▶ để xem đúng đoạn, chỉnh ±1 giây, viết chú thích, và <b>🎙 thu bình luận</b> của bạn (phát sau đoạn đó trên khung hình dừng).</p>
+    <p class="hint shortsOnly">Mỗi đoạn thành một Short (đoạn đầu là đoạn hay nhất). Bấm ▶ để xem đúng đoạn, chỉnh ±1 giây cho trọn câu đùa.</p>
+    <p class="hint longOnly">Đoạn cuối là <b>#1</b> (hay nhất). Bấm ▶ để xem đúng đoạn, chỉnh ±1 giây, viết chú thích, và <b>🎙 thu bình luận</b> của bạn (phát sau đoạn đó trên khung hình dừng).</p>
     <div id="plan" class="clips"></div>
     <h2 class="mt">Ứng viên khác <span id="restInfo" class="hint"></span></h2>
     <div id="rest" class="clips"></div>
@@ -213,17 +402,17 @@
     <p class="hint" id="nowPlaying"></p>
     <label class="lbl">Tiêu đề video</label>
     <input id="title">
-    <label class="check"><input type="checkbox" id="countdown"> Đánh số đếm ngược (… #3, #2, #1)</label>
+    <label class="check longOnly"><input type="checkbox" id="countdown"> Đánh số đếm ngược (… #3, #2, #1)</label>
     <label class="check"><input type="checkbox" id="credits"> Hiện nguồn (tên kênh + tên video) trên từng đoạn</label>
     <label class="check"><input type="checkbox" id="subtitles"> Phụ đề tiếng Anh trên từng đoạn (lấy từ phụ đề YouTube)</label>
-    <label class="check"><input type="checkbox" id="shortsOpt"> ✂ Cắt 3 Shorts dọc khi dựng</label>
-    <div class="row ttsRow">
+    <label class="check longOnly"><input type="checkbox" id="shortsOpt"> ✂ Cắt 3 Shorts dọc khi dựng</label>
+    <div class="row ttsRow longOnly">
       <select id="ttsVoice" title="Giọng đọc"><option value="en-US-AndrewNeural">Andrew (nam, Mỹ)</option><option value="en-US-AvaNeural">Ava (nữ, Mỹ)</option><option value="en-US-BrianNeural">Brian (nam, Mỹ, trẻ)</option><option value="en-GB-RyanNeural">Ryan (nam, Anh)</option></select>
       <select id="ttsTakes" title="Số đoạn có lời bình"><option value="3">3 đoạn top</option><option value="5">5 đoạn top</option><option value="8">8 đoạn top</option></select>
       <button id="ttsBtn" class="mini">🤖 Tạo lời bình giọng đọc</button>
     </div>
-    <label class="lbl">Chữ to trên thumbnail <span class="hint">(ngắn, 2–5 chữ)</span></label>
-    <input id="thumbText" maxlength="60" placeholder="vd: TRY NOT TO LAUGH · HE SAID WHAT?!">
+    <label class="lbl longOnly">Chữ to trên thumbnail <span class="hint">(ngắn, 2–5 chữ)</span></label>
+    <input class="longOnly" id="thumbText" maxlength="60" placeholder="vd: TRY NOT TO LAUGH · HE SAID WHAT?!">
     <div class="row">
       <button id="buildBtn" class="primary big">🎬 Dựng video</button>
       <button id="cancelBtn" class="hidden">Huỷ</button>
@@ -231,6 +420,7 @@
     <div class="progress hidden" id="prog"><div></div></div>
     <p class="note" id="buildNote"></p>
     <div id="outBox" class="hidden">
+      <div class="longOnly">
       <video id="outVideo" controls playsinline></video>
       <label class="lbl">Chọn thumbnail <span class="hint">(bấm để tải)</span></label>
       <div class="thumbs" id="thumbs"></div>
@@ -249,8 +439,11 @@
       <textarea id="ytDesc" rows="12"></textarea>
       <label class="lbl">Tag (dán vào ô “Thẻ” trên YouTube Studio) <button class="mini" data-copy="ytTags">Copy</button></label>
       <textarea id="ytTags" rows="3"></textarea>
+      </div>
       <div id="shortsBox" class="hidden">
-        <label class="lbl">✂ Shorts <span class="hint">(đăng cách nhau vài giờ để kéo người xem về video dài)</span></label>
+        <label class="lbl">✂ Shorts <span class="hint longOnly">(đăng cách nhau vài giờ để kéo người xem về video dài)</span>
+          <span class="hint shortsOnly">(đăng cách nhau vài giờ)</span></label>
+        <div class="row shortsOnly"><span class="hint">Tag chung:</span><button class="mini" data-copy="ytTags">Copy tag</button></div>
         <div id="shortsList" class="shorts"></div>
       </div>
     </div>

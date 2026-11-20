@@ -1,12 +1,14 @@
+import random
 import subprocess
 from pathlib import Path
 import time
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
 import server
-from clipmaker import compose, copywrite, moments, seo, trends, voice
+from clipmaker import compose, copywrite, moments, music, seo, stream, trends, voice
 from clipmaker import youtube as yt
 
 
@@ -61,7 +63,7 @@ def test_segments_share_format_and_concat(tmp_path):
 
 
 def _wait(c, pid):
-    for _ in range(1500):
+    for _ in range(3000):                 # tối đa 5 phút (máy bận dựng video khác thì chậm hơn)
         job = c.get(f"/api/projects/{pid}/job").json()
         if job["done"]:
             return job
@@ -83,7 +85,7 @@ def fake_youtube(monkeypatch, tmp_path):
 
     downloads = []
 
-    def download(vid, start, end, out, progress=None):
+    def download(vid, start, end, out, progress=None, full=True):
         downloads.append((vid, start, end))
         return _fake_video(out, end - start)
 
@@ -276,7 +278,15 @@ def test_trends_find_hot_topics_and_seed_project(fake_youtube, monkeypatch):
                                      _hot(4, "Nobody Expected Michelle Obama To Be This Funny", 4_000_000),
                                      _hot(5, "Michelle Obama Savage Moments", 3_000_000)],
     }
-    monkeypatch.setattr(seo, "month_top", lambda kw, n=30: hot.get(kw, [_hot(9, "Funny Moments Compilation", 1000)]))
+    periods = []
+
+    def top_videos(kw, n=30, period="month"):
+        periods.append(period)
+        return [dict(v) for v in hot.get(kw, [_hot(9, "Funny Moments Compilation", 1000)])]
+
+    monkeypatch.setattr(seo, "top_videos", top_videos)
+    monkeypatch.setattr(trends, "_details", lambda vid: {"ts": time.time() - 2 * 86400, "date": None, "likes": 1000,
+                                                         "comments": 10, "subs": 50_000, "views": 0})
     assert trends.expand("funny moments")[:3] == ["funny moments", "funny moments roblox", "funny moments compilation"]
     c = TestClient(server.app)
     assert c.post("/api/trends", json={"seed": " "}).status_code == 400
@@ -296,6 +306,17 @@ def test_trends_find_hot_topics_and_seed_project(fake_youtube, monkeypatch):
     roblox = next(t for t in res["topics"] if t["name"] == "Roblox")
     assert roblox["keyword"] == "funny moments roblox"                      # đúng cụm người xem gõ
     assert res["keywords"][0]["heat"] == 100
+    assert set(periods) == {"month"} and res["period"] == "month" and "all" not in res["keywords"][0]
+    ana = res["analysis"]
+    assert ana["rising"] and ana["rising"][0]["id"] == "hot00000001" and ana["rising"][0]["keyword"] == "funny moments roblox"
+    assert ana["rising"][0]["ratio"] == 180 and any("gấp 180 lần" in w for w in ana["rising"][0]["why"])
+    c.post("/api/trends", json={"seed": "funny moments", "depth": 6, "period": "week"})
+    for _ in range(100):
+        r = c.get("/api/trends").json()
+        if r["job"]["done"]:
+            break
+        time.sleep(0.05)
+    assert r["result"]["period"] == "week" and periods[-1] == "week"
 
     # "Tạo video tương tự": quét các video đang hot trước
     seen = []
@@ -312,6 +333,34 @@ def test_trends_find_hot_topics_and_seed_project(fake_youtube, monkeypatch):
     _wait(c, pid)
     p = c.get(f"/api/projects/{pid}").json()["project"]
     assert seen[:3] == seeds[:3] and p["ref"] == "Michelle Obama" and "bad id!" not in p["seed_videos"]
+
+
+def test_trend_analysis_formats_titles_and_rising(monkeypatch):
+    from clipmaker import trends
+
+    now = time.time()
+    vids = []
+    for i in range(6):                     # Shorts nhiều view hơn, tiêu đề VIẾT HOA nhiều view hơn
+        vids.append({"id": f"s{i:010d}", "title": f"He said WHAT {i} 😂", "channel": "Big", "views": 3_000_000 + i,
+                     "duration": 30, "keyword": "funny shorts"})
+        vids.append({"id": f"l{i:010d}", "title": f"funny moments part {i}", "channel": f"Small{i}", "views": 200_000 + i,
+                     "duration": 700 + i, "keyword": "funny moments"})
+    det = {v["id"]: {"ts": now - (1 if v["id"].startswith("l") else 10) * 86400, "date": None, "likes": 10,
+                     "comments": 0, "subs": 10_000 if v["id"].startswith("l") else 5_000_000, "views": 0} for v in vids}
+    det["l0000000005"] = None                             # video lỗi: bỏ qua
+    monkeypatch.setattr(trends, "_details", lambda vid: det[vid] or (_ for _ in ()).throw(RuntimeError("x")))
+    a = trends.analyze(vids, [], now=now)
+    assert a["count"] == 12 and a["format"]["shorts"]["count"] == 6 and a["format"]["long"]["median"] < 1_000_000
+    assert a["features"][0]["label"] == "Có từ VIẾT HOA nhấn mạnh" and a["features"][0]["lift"] > 10
+    assert a["tips"][0].startswith("Shorts đang ăn khách hơn")
+    assert a["lengths"][0]["label"] == "10–20 phút"
+    assert "l0000000005" not in [r["id"] for r in a["rising"]]
+    small = next(r for r in a["rising"] if r["id"] == "l0000000000")
+    assert small["ratio"] == 20 and small["per_day"] == 200_000 and small["similar"] and "l0000000000" not in small["similar"]
+    assert a["channels"][0]["name"] == "Big" and trends.analyze([], []) is None
+    assert sum(r["channel"] == "Big" for r in a["rising"]) == 2          # mỗi kênh tối đa 2 video đang lên
+    vids[0]["title"] = "🔴 LIVE funny stream"
+    assert "s0000000000" not in [r["id"] for r in trends.analyze(vids, [], now=now)["rising"]]   # bỏ livestream
 
 
 def test_auto_makes_everything_with_voiceover(fake_youtube, monkeypatch):
@@ -369,7 +418,7 @@ def test_channels_queue_builds_and_uploads(fake_youtube, monkeypatch):
     topics = {"seed": "celeb", "keywords": [], "patterns": [], "at": 0,
               "topics": [{"name": "Kevin Hart", "keyword": "kevin hart funny moments", "videos": [{"id": "vid1"}]},
                          {"name": "Roblox", "keyword": "funny moments roblox", "videos": [{"id": "vid2"}]}]}
-    monkeypatch.setattr(trends, "research", lambda seed, depth=10, job=None: topics)
+    monkeypatch.setattr(trends, "research", lambda seed, depth=10, job=None, **kw: topics)
     c = TestClient(server.app)
     assert c.get("/api/channels/connect").status_code == 400          # chưa có client id
     c.put("/api/channels/settings", json={"client_id": "cid", "client_secret": "sec", "workers": 2,
@@ -452,7 +501,7 @@ def test_bot_block_stops_build_instead_of_short_video(fake_youtube, monkeypatch)
     ok_download = yt.download
     calls = []
 
-    def flaky(vid, start, end, out, progress=None):
+    def flaky(vid, start, end, out, progress=None, full=True):
         calls.append(vid)
         if len(calls) > 2:
             raise yt.Blocked("Sign in to confirm you're not a bot")
@@ -624,3 +673,450 @@ def test_engage_comment_text():
     assert out["pin"] and "{" not in out["pin"] and "👇" in out["pin"]
     out = copywrite.make("funny cats", [{"num": 1, "ts": "", "line": "", "comment": ""}], 3, "", "", seed=2)
     assert "{" not in out["pin"] and "  " not in out["pin"]
+
+
+def test_shorts_only_project(fake_youtube):
+    c = TestClient(server.app)
+    r = c.post("/api/projects", json={"keyword": "celeb funny", "kind": "shorts", "count": 3, "length": 6,
+                                      "videos": 4, "auto": True, "voiceover": True})
+    pid = r.json()["project"]["id"]
+    job = _wait(c, pid)
+    assert job["error"] is None and job["result"]["shorts"] == 3
+    v = c.get(f"/api/projects/{pid}").json()
+    p = v["project"]
+    assert p["kind"] == "shorts" and v["output"] and not (server.DATA / pid / "output.mp4").exists()
+    assert len(p["order"]) == 3 and len({c_["vid"] for c_ in p["clips"] if c_["include"]}) == 3   # mỗi video 1 đoạn
+    assert not any(c_.get("voice") for c_ in p["clips"])                                           # không lời bình
+    sh = p["shorts_out"]
+    assert [x["file"] for x in sh] == ["short_1.mp4", "short_2.mp4", "short_3.mp4"]
+    assert len({x["hook"] for x in sh}) == 3                                                      # không lặp hook
+    assert all(x["title"].endswith("#shorts") and "Follow" in x["description"] and "full video" not in
+               x["description"].lower() and x["pin"] for x in sh)
+    err = subprocess.run([compose.FFMPEG, "-i", str(server.DATA / pid / "short_1.mp4")], capture_output=True,
+                         text=True).stderr
+    assert "1080x1920" in err
+    assert c.get(f"/api/projects/{pid}/files/short_3.mp4").status_code == 200
+    assert p["youtube"]["tags"] and next(x for x in c.get("/api/projects").json() if x["id"] == pid)["kind"] == "shorts"
+    v = c.post(f"/api/projects/{pid}/autoselect", json={"count": 2}).json()
+    assert len(v["plan"]) == 2 and not v["output"]
+
+
+def test_reply_to_comment_shorts(fake_youtube, monkeypatch):
+    from PIL import Image
+
+    texts = {0: "4:00 lol", 1: "4:01 the way he looked at the camera 💀 I can't breathe",
+             2: "4:02 why did nobody talk about this part?", 3: "4:03 this is so true honestly my dad does this"}
+    real = yt.analyze
+
+    def analyze(vid, comments=120):
+        i = int(vid[-1])
+        info = real(vid, comments)
+        info["marks"] = [{"t": 400 + i, "likes": 10 ** (i + 1), "text": texts[i], "author": f"@fan{i}"}]
+        return info
+
+    monkeypatch.setattr(yt, "analyze", analyze)
+    spoken = []
+
+    def speak(text, out, v=None):
+        spoken.append((text, v))
+        subprocess.run([compose.FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=440:d=1", str(out)], check=True)
+        return out
+
+    monkeypatch.setattr(voice, "speak", speak)
+    c = TestClient(server.app)
+    r = c.post("/api/projects", json={"keyword": "celeb funny", "kind": "shorts", "reply": True, "count": 2,
+                                      "length": 6, "videos": 4, "auto": True, "voice": "en-US-AndrewNeural"})
+    pid = r.json()["project"]["id"]
+    job = _wait(c, pid)
+    assert job["error"] is None and job["result"]["shorts"] == 2
+    p = c.get(f"/api/projects/{pid}").json()["project"]
+    assert p["reply"] and p["comments"] and p["title"].startswith("💬")
+    picked = [c_ for c_ in p["clips"] if c_["include"]]
+    assert "@fan0" not in [c_["author"] for c_ in picked]                  # "4:00 lol": không đủ ý để trả lời
+    sh = p["shorts_out"]
+    assert {x["author"] for x in sh} <= {"@fan1", "@fan2", "@fan3"} and all(x["reply"] and x["comment"] for x in sh)
+    assert not any(x["comment"].startswith("4:0") for x in sh)             # bỏ mốc giờ của video gốc
+    assert all(x["title"].endswith("#shorts") and "Replying to @fan" in x["description"] for x in sh)
+    assert len(spoken) == 2 and all(v == "en-US-AndrewNeural" for _, v in spoken)
+    err = subprocess.run([compose.FFMPEG, "-i", str(server.DATA / pid / "short_1.mp4")], capture_output=True,
+                         text=True).stderr
+    assert "1080x1920" in err and "Audio" in err
+    assert copywrite.reply_line("why is he like this?", random.Random(1)) in copywrite.REPLY_ASK
+    assert copywrite.reply_text("0:12 losing his shit 😂") == "losing his s**t 😂"
+    assert copywrite.reply_score("you are a retard lol so funny", 10_000) < 0          # bình luận miệt thị: bỏ
+    ov = compose.reply_overlay("@a_very_long_user_name_that_goes_on_and_on_forever", "x " * 200, "Glad you asked", "")
+    assert isinstance(ov, Image.Image) and ov.size == (1080, 1920)
+
+
+def test_channel_shorts_only(fake_youtube, monkeypatch):
+    from clipmaker import ytapi
+    uploads, comments = [], []
+    monkeypatch.setattr(ytapi, "exchange", lambda cid, sec, code, redirect: {"access_token": "A", "refresh_token": "R"})
+    monkeypatch.setattr(ytapi, "channel", lambda tok: {"id": "UC1", "title": "Ch", "thumb": ""})
+    monkeypatch.setattr(ytapi, "refresh", lambda cid, sec, rt: {"access_token": "A2"})
+    monkeypatch.setattr(ytapi, "upload", lambda tok, path, meta, progress=None, stop=None:
+                        uploads.append((path.name, meta)) or f"v{len(uploads)}")
+    monkeypatch.setattr(ytapi, "set_thumbnail", lambda tok, vid, jpg: pytest.fail("Shorts không đặt thumbnail"))
+    monkeypatch.setattr(ytapi, "comment", lambda tok, vid, text: comments.append(text) or "c1")
+    c = TestClient(server.app)
+    c.put("/api/channels/settings", json={"client_id": "cid", "client_secret": "sec"})
+    state = c.get("/api/channels/connect").json()["url"].split("state=")[1].split("&")[0]
+    c.get(f"/?code=abc&state={state}", follow_redirects=False)
+    assert c.put("/api/channels/UC1", json={"long": False, "shorts": False}).status_code == 400
+    acc = c.put("/api/channels/UC1", json={"seeds": ["celeb"], "mode": "keywords", "long": False, "shorts_n": 2,
+                                           "privacy": "unlisted"}).json()["accounts"][0]
+    assert acc["shorts_n"] == 2 and acc["long"] is False
+    c.post("/api/channels/UC1/run", json={"count": 1})
+    for _ in range(3000):
+        t = c.get("/api/channels").json()["tasks"][0]
+        if t["status"] in ("done", "error"):
+            break
+        time.sleep(0.1)
+    assert t["status"] == "done", t["error"]
+    assert t["video"] is None and len(t["shorts"]) == 2
+    assert [name for name, _ in uploads] == ["short_1.mp4", "short_2.mp4"]
+    assert all("Full video" not in m["snippet"]["description"] and m["snippet"]["title"].endswith("#shorts")
+               for _, m in uploads)
+    assert server.load(t["project"])["kind"] == "shorts"
+    with server.ACC_LOCK:
+        d = server._accounts()
+        for u in d["accounts"][0]["uploads"]:
+            u["c_due"] = 0
+        server._save_accounts(d)
+    server._post_comments()
+    assert len(comments) == 2 and all("Full video" not in x for x in comments)
+
+
+def test_music_titles_and_timeline():
+    assert music.split_title("SƠN TÙNG M-TP | CHÚNG TA CỦA TƯƠNG LAI | OFFICIAL MV") == ("SƠN TÙNG M-TP", "CHÚNG TA CỦA TƯƠNG LAI")
+    assert music.split_title("ATEEZ(에이티즈) - 'UP' Official MV") == ("ATEEZ(에이티즈)", "UP")
+    assert music.split_title("ILLIT (아일릿) 'Magnetic' Official MV") == ("ILLIT", "Magnetic")
+    # "TÊN BÀI - Ca sĩ x Ca sĩ": đảo lại cho đúng
+    assert music.split_title("Em Sẽ Đi Thật Lâu – Nguyệt Chan x Thanh Hưng (Official Music Video)") == \
+        ("Nguyệt Chan x Thanh Hưng", "Em Sẽ Đi Thật Lâu")
+    assert music.NOT_SONG.search("Top 20 V-Pop nonstop mix 2026") and not music.NOT_SONG.search("Đen - Lối Nhỏ (M/V)")
+    starts, total = music.timeline([200, 180, 150], 3)
+    assert starts == [0, 197, 374] and total == 524
+    assert music.chart_url("vn", "rap").endswith("/vn/rss/topsongs/limit=100/genre=18/json")
+    assert "genre=51" in music.chart_url("kr", "pop") and music.chart_url("kr", "rap") is None
+    assert music.chart_url("vn", "lofi") is None                 # không có bảng xếp hạng: tìm YouTube
+
+
+def test_music_find_prefers_chart_then_fills(monkeypatch):
+    monkeypatch.setattr(music, "chart", lambda c, g, n=100: [("Đen", "Lối Nhỏ"), ("Đen", "Mười Năm"), ("Đen", "Bài Này Chill Phết"),
+                                                              ("Junk", "Ringtone")])
+
+    def match(artist, song, version="original"):
+        if artist == "Junk":
+            return None
+        return {"id": f"id{abs(hash(song)) % 10**9:011d}"[:11], "title": f"{artist} - {song}", "channel": artist,
+                "views": 1_000_000, "duration": 200, "artist": artist, "song": song, "base": song, "version": version}
+
+    monkeypatch.setattr(music, "match", match)
+    monkeypatch.setattr(seo, "top_videos", lambda q, n=30, period="month": [
+        {"id": "yt000000001", "title": "Mỹ Tâm - Hoa Nắng (Official MV)", "channel": "My Tam", "views": 900_000, "duration": 250},
+        {"id": "yt000000002", "title": "TOP 50 nhạc trẻ nonstop", "channel": "x", "views": 5_000_000, "duration": 3600},
+        {"id": "yt000000003", "title": "bài AI", "channel": "x", "views": 50, "duration": 200}])
+    got = music.find("vn", "pop", 5, "month")
+    assert [g["song"] for g in got] == ["Lối Nhỏ", "Mười Năm", "Hoa Nắng"]       # tối đa 2 bài / nghệ sĩ, bỏ rác
+    assert got[0]["rank"] == 1
+    # bài đã dùng ở bản mix trước: bỏ
+    got = music.find("vn", "pop", 5, "month", used={music.song_key("Lối Nhỏ")})
+    assert [g["song"] for g in got] == ["Mười Năm", "Bài Này Chill Phết", "Hoa Nắng"]
+
+
+def test_music_versions_of_alltime_hits(monkeypatch):
+    hits = [{"id": "hit00000001", "title": "SÓNG GIÓ | ICM x JACK | OFFICIAL MUSIC VIDEO", "channel": "ICM",
+             "views": 480_000_000, "duration": 300},
+            {"id": "hit00000002", "title": "NƠI NÀY CÓ ANH | OFFICIAL MUSIC VIDEO | SƠN TÙNG M-TP", "channel": "Sơn Tùng M-TP",
+             "views": 460_000_000, "duration": 280}]
+    periods = []
+    monkeypatch.setattr(seo, "top_videos", lambda q, n=30, period="month": periods.append(period) or hits)
+    monkeypatch.setattr(music, "chart", lambda c, g, n=100: [])
+    got = music.find("vn", "all", 5)                                    # mặc định: hot nhất mọi thời điểm, bản gốc
+    assert set(periods) == {"all"} and [g["id"] for g in got] == ["hit00000001", "hit00000002"]
+    assert got[1]["artist"] == "Sơn Tùng M-TP" and got[1]["song"] == "NƠI NÀY CÓ ANH"
+
+    searched = []
+
+    class FakeYDL:
+        def __init__(self, opts): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+        def extract_info(self, q, download=False):
+            searched.append(q)
+            return {"entries": [
+                {"id": "lofi0000001", "title": "Sóng Gió (Lofi Ver.) - K-ICM x Jack | DH's House", "channel": "x",
+                 "view_count": 5_000_000, "duration": 240},
+                {"id": "remx0000001", "title": "Sóng Gió (Masew Remix) - K-ICM x Jack", "channel": "x",
+                 "view_count": 2_000_000, "duration": 230},
+                {"id": "remx0000002", "title": "Nơi Này Có Anh Remix - Sơn Tùng", "channel": "y",
+                 "view_count": 900_000, "duration": 220}]}
+
+    monkeypatch.setattr(music.yt_dlp, "YoutubeDL", FakeYDL)
+    got = music.find("vn", "all", 5, version="remix")
+    assert "remix" in searched[0].lower()
+    assert [g["id"] for g in got] == ["remx0000001", "remx0000002"]      # bản lofi trên kênh "House" không tính
+    assert got[0]["song"] == "SÓNG GIÓ (Remix)" and got[0]["base"] == "SÓNG GIÓ"
+    assert music.song_key(got[0]["song"]) == music.song_key("SÓNG GIÓ")
+    assert music.name("vn", "all", version="remix") == "V-Pop Remix"
+
+
+def test_music_mix_end_to_end(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "MIXES", tmp_path / "mixes")
+    monkeypatch.setattr(server, "MUSIC_CACHE", tmp_path / "cache")
+    songs = [{"id": f"song{i:07d}", "title": f"Artist {i} - Song {i}", "channel": f"Artist {i}", "views": 10**6,
+              "duration": 8, "artist": f"Artist {i}", "song": f"Song {i}", "rank": i + 1} for i in range(3)]
+    monkeypatch.setattr(music, "find", lambda *a, **kw: songs)
+
+    def audio(vid, out):
+        compose.run(["-f", "lavfi", "-i", f"sine=frequency={300 + int(vid[-1]) * 200}:duration=8", "-ac", "2",
+                     "-ar", "48000", "-c:a", "flac", str(out)])
+        return out
+
+    def cover(vid, out):
+        from PIL import Image
+        Image.new("RGB", (480, 270), (40 * int(vid[-1]), 90, 160)).save(out)
+        return out
+
+    monkeypatch.setattr(music, "download_audio", audio)
+    monkeypatch.setattr(music, "fetch_cover", cover)
+    c = TestClient(server.app)
+    assert c.post("/api/mixes", json={"country": "xx"}).status_code == 400
+    monkeypatch.setattr(server, "_music_hist_file", lambda: tmp_path / "music_history.json")
+    mid = c.post("/api/mixes", json={"country": "vn", "genre": "pop", "count": 3, "fade": 2, "period": "month"}).json()["mix"]["id"]
+
+    def wait():
+        for _ in range(1500):
+            job = c.get(f"/api/mixes/{mid}").json()["job"]
+            if job and job["done"]:
+                return job
+            time.sleep(0.1)
+        raise AssertionError("job chưa xong")
+
+    assert wait()["error"] is None
+    v = c.get(f"/api/mixes/{mid}").json()
+    assert [t["song"] for t in v["tracks"]] == ["Song 0", "Song 1", "Song 2"] and v["total"] == 20
+    order = [t["id"] for t in v["tracks"]][::-1]
+    v = c.put(f"/api/mixes/{mid}", json={"order": order, "track": order[0], "artist": "Nghệ Sĩ Mới"}).json()
+    assert v["tracks"][0]["artist"] == "Nghệ Sĩ Mới"
+    c.post(f"/api/mixes/{mid}/build")
+    job = wait()
+    assert job["error"] is None and job["result"]["songs"] == 3
+    v = c.get(f"/api/mixes/{mid}").json()
+    assert v["output"]
+    out = tmp_path / "mixes" / mid / "output.mp4"
+    info = compose.probe(out)
+    assert info["video"] and info["audio"] and abs(info["duration"] - 20) < 0.6       # 3 x 8 s - 2 x 2 s crossfade
+    y = v["mix"]["youtube"]
+    assert y["title"].startswith("Top 3 Hot V-Pop Songs")
+    assert "0:00 Nghệ Sĩ Mới - Song 2\n0:06 Artist 1 - Song 1\n0:12 Artist 0 - Song 0" in y["description"]
+    assert "https://youtu.be/song0000000" in y["description"]
+    assert c.get(f"/api/mixes/{mid}/files/thumbnail.jpg").status_code == 200
+    v = c.put(f"/api/mixes/{mid}", json={"title": "My Playlist 🎧"}).json()       # đổi tiêu đề: không phải dựng lại
+    assert v["mix"]["youtube"]["title"] == "My Playlist 🎧" and v["output"]
+    assert c.get("/api/mixes").json()[0]["id"] == mid
+    assert c.get("/api/music/options").json()["used"] == {"original": 3}      # lần sau không lặp 3 bài này
+    assert c.delete(f"/api/mixes/{mid}").json()["ok"] and c.get(f"/api/mixes/{mid}").status_code == 404
+
+
+def test_music_mashup_beat_matched(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "MIXES", tmp_path / "mixes")
+    monkeypatch.setattr(server, "MUSIC_CACHE", tmp_path / "cache")
+    monkeypatch.setattr(server, "_music_hist_file", lambda: tmp_path / "music_history.json")
+    bpms = {"song0000000": 120, "song0000001": 124, "song0000002": 116}
+    songs = [{"id": k, "title": f"A{i} - S{i}", "channel": f"A{i}", "views": 10**6, "duration": 60,
+              "artist": f"A{i}", "song": f"S{i}"} for i, k in enumerate(bpms)]
+    monkeypatch.setattr(music, "find", lambda *a, **kw: songs)
+
+    def audio(vid, out):                       # tiếng gõ nhịp đúng BPM, 60 giây
+        b = bpms[vid]
+        compose.run(["-f", "lavfi", "-i", f"aevalsrc='0.8*sin(2*PI*60*t)*exp(-25*mod(t\\,60/{b}))':s=44100:d=60",
+                     "-ac", "2", "-ar", "48000", "-c:a", "flac", str(out)])
+        return out
+
+    def cover(vid, out):
+        from PIL import Image
+        Image.new("RGB", (480, 270), (90, 90, 160)).save(out)
+        return out
+
+    monkeypatch.setattr(music, "download_audio", audio)
+    monkeypatch.setattr(music, "fetch_cover", cover)
+    monkeypatch.setattr(yt, "analyze", lambda vid, comments=0: {"duration": 60, "heatmap": [[30, 33, 1.0], [0, 3, 0.2]]})
+    c = TestClient(server.app)
+    mid = c.post("/api/mixes", json={"country": "vn", "genre": "pop", "count": 3, "style": "mashup", "auto": True,
+                                     "period": "month"}).json()["mix"]["id"]
+    for _ in range(1500):
+        job = c.get(f"/api/mixes/{mid}").json()["job"]
+        if job and job["done"]:
+            break
+        time.sleep(0.1)
+    assert job["error"] is None, job["error"]
+    v = c.get(f"/api/mixes/{mid}").json()
+    bpm = v["mix"]["bpm"]
+    assert abs(bpm - 120) < 1.5                                     # nhịp chung = trung vị
+    beat = 60 / bpm
+    want = 3 * music.MASH_BEATS * beat - 2 * music.MASH_XFADE * beat
+    assert abs(compose.probe(tmp_path / "mixes" / mid / "output.mp4")["duration"] - want) < 0.6
+    y = v["mix"]["youtube"]
+    assert "Mashup" in y["title"] and "3 Hit Songs" in y["title"] and "mashup" in y["tags"]
+    assert v["mix"]["tracks"]["song0000000"]["peak"] == 31.5        # đỉnh "Most replayed" được lưu lại
+
+
+def test_music_bpm_and_beats(tmp_path):
+    for b in (92, 128, 150):
+        f = tmp_path / f"c{b}.flac"
+        compose.run(["-f", "lavfi", "-i", f"aevalsrc='0.8*sin(2*PI*60*t)*exp(-25*mod(t\\,60/{b}))':s=44100:d=40",
+                     "-c:a", "flac", str(f)])
+        start, length, bpm = music.chorus(f)
+        assert abs(bpm - b) < 0.5
+        p = 60 / b
+        off = (start + p / 2) % p - p / 2
+        assert abs(off) < 0.02                                       # bắt đầu đúng phách (sai < 20 ms)
+        assert abs(length - music.MASH_BEATS * 60 / bpm) < 0.01
+    assert music.common_bpm([60, 124, 240, 118]) in (120, 124)
+    assert music.stretch_ratio(64, 128) == 1.0 and music.stretch_ratio(100, 128) is None
+    # nhóm nhịp như DJ: bài chậm một nhóm, bài nhanh một nhóm, từ chậm đến nhanh, mỗi bài đổi nhịp <= 12%
+    bpms = [115, 95, 92, 120, 90, 128, 140, 85, 140, 132, 134, 130]
+    groups = music.tempo_groups(bpms)
+    assert sorted(i for _, g in groups for i in g) == list(range(len(bpms)))
+    assert [round(g[0]) for g in groups] == sorted(round(g[0]) for g in groups) and len(groups) <= 3
+    assert all(music.stretch_ratio(bpms[i], tgt) for tgt, g in groups for i in g)
+
+
+def _chat_line(t, text, paid=False):
+    import json
+    key = "liveChatPaidMessageRenderer" if paid else "liveChatTextMessageRenderer"
+    return json.dumps({"replayChatItemAction": {"videoOffsetTimeMsec": str(int(t * 1000)), "actions": [
+        {"addChatItemAction": {"item": {key: {"message": {"runs": [{"text": text}, {"emoji": {"emojiId": "😂"}}]}}}}}]}})
+
+
+def test_stream_link_and_chat_parsing(tmp_path):
+    for url in ("https://www.youtube.com/watch?v=dez_J8xsFKg&t=10s", "https://youtu.be/dez_J8xsFKg",
+                "https://www.youtube.com/live/dez_J8xsFKg?si=x", "dez_J8xsFKg"):
+        assert stream.video_id(url) == "dez_J8xsFKg"
+    with pytest.raises(ValueError):
+        stream.video_id("https://example.com/video")
+    f = tmp_path / "c.live_chat.json"
+    f.write_text("\n".join([_chat_line(12.5, "hello chat"), _chat_line(20, "big love", paid=True), "rác"]))
+    chat = stream.parse_chat(f)
+    assert chat == [(12.5, "hello chat😂", 2.0), (20.0, "big love😂", 4.0)]        # 😂 -> cộng điểm, Super Chat x3
+
+
+def test_stream_highlights_follow_chat_and_shouting():
+    dur = 3 * 3600
+    rnd = random.Random(1)
+    chat = [(rnd.uniform(0, dur), "ok", 1.0) for _ in range(dur // 20)]          # chat đều đều suốt stream
+    chat += [(5000 + rnd.uniform(0, 12), "no way bro =))", 2.0) for _ in range(120)]  # bùng nổ sau khoảnh khắc 5000s
+    chat += [(60 + rnd.uniform(0, 10), "hi everyone", 1.0) for _ in range(200)]  # chào đầu stream: phải bỏ qua
+    db = np.full(dur, -32.0, dtype=np.float32) + np.array([rnd.uniform(-2, 2) for _ in range(dur)], dtype=np.float32)
+    db[8000:8004] = -12                                                            # streamer hét lúc 8000s
+    score, parts = stream.curve(dur, chat, db)
+    hs = stream.highlights(dur, score, parts, db, chat, (), length=45, n=5)
+    assert all(h["start"] > stream.SKIP_HEAD for h in hs)
+    first = hs[0]
+    assert abs(first["peak"] - (5000 + 6 - stream.CHAT_LAG)) <= 8 and "Chat" in first["reasons"][0]
+    a = int(first["peak"] - 45 * stream.PEAK_AT)                                  # đầu đoạn rơi vào chỗ yên nhất
+    assert first["start"] == a - stream.SNAP + int(np.argmin(db[a - stream.SNAP: a + stream.SNAP // 2 + 1]))
+    assert 45 - 2 * stream.SNAP <= first["end"] - first["start"] <= 45 + 2 * stream.SNAP
+    assert first["comment"] == "no way bro =))"
+    loud = next(h for h in hs if abs(h["peak"] - 8002) <= 4)
+    assert loud["start"] < 8000 < loud["end"] and any("Tiếng to" in r for r in loud["reasons"])
+    assert all(abs(a["peak"] - b["peak"]) >= 60 for a in hs for b in hs if a is not b)
+
+
+def test_stream_loudness_reads_audio(tmp_path):
+    f = tmp_path / "a.wav"
+    compose.run(["-f", "lavfi", "-i", "anullsrc=r=8000:cl=mono", "-f", "lavfi", "-i", "sine=f=440:r=8000",
+                 "-filter_complex", "[0]atrim=0:3[a];[1]atrim=0:2,volume=0.5[b];[a][b]concat=n=2:v=0:a=1",
+                 str(f)])
+    db = stream.loudness(f)
+    assert len(db) == 5 and db[:3].max() < -80 and -29 < db[3] < -25          # sine 1/8 x 0.5 -> RMS -27 dB
+
+
+def test_stream_shorts_project(fake_youtube, monkeypatch):
+    dur = 2 * 3600
+    rnd = random.Random(2)
+    chat = [(rnd.uniform(0, dur), "ok", 1.0) for _ in range(300)]
+    for t in (1500, 3000, 4500, 6000):
+        chat += [(t + rnd.uniform(0, 10), "bro what was that =))", 2.0) for _ in range(60)]
+    monkeypatch.setattr(yt, "analyze", lambda vid, comments=120: {
+        "id": vid, "title": "Full Stream 20/11", "channel": "My Channel", "duration": dur, "views": 10,
+        "heatmap": [], "chapters": [], "marks": [], "tags": [], "caption_url": None,
+        "caption_native": "https://captions/vi"})
+    monkeypatch.setattr(stream, "fetch_chat", lambda vid, work: chat)
+    monkeypatch.setattr(stream, "fetch_loudness", lambda vid, work, stop: np.full(dur, -30.0, dtype=np.float32))
+    c = TestClient(server.app)
+    assert c.post("/api/projects", json={"keyword": "x", "stream": "https://example.com/v", "length": 45}).status_code == 400
+    assert c.post("/api/projects", json={"keyword": "x", "stream": "abcdefghijk", "length": 10}).status_code == 400
+    r = c.post("/api/projects", json={"keyword": "stream", "stream": "https://youtu.be/abcdefghijk", "kind": "shorts",
+                                      "count": 3, "length": 30, "auto": True})
+    pid = r.json()["project"]["id"]
+    job = _wait(c, pid)
+    assert job["error"] is None and job["result"]["shorts"] == 3
+    v = c.get(f"/api/projects/{pid}").json()
+    p = v["project"]
+    assert p["stream"] == "abcdefghijk" and p["keyword"] == "My Channel" and p["title"] == "📺 Full Stream 20/11"
+    assert p["signals"]["chat"] == len(chat) and p["signals"]["loud"]
+    assert len(p["order"]) == 3 and {c_["vid"] for c_ in p["clips"]} == {"abcdefghijk"}   # nhiều đoạn cùng video
+    assert p["videos"]["abcdefghijk"]["caption_url"] == "https://captions/vi"
+    assert all(25 <= e - s <= 35 for _, s, e in fake_youtube)
+    sh = p["shorts_out"]
+    assert len(sh) == 3 and all("youtu.be/abcdefghijk" in x["description"] for x in sh)
+    assert sh[0]["hook"] == '"bro what was that"'                 # câu chat nhiều người gõ, bỏ ký tự lạ
+    cid = p["order"][0]
+    clip = next(x for x in p["clips"] if x["id"] == cid)
+    assert c.put(f"/api/projects/{pid}/clips/{cid}", json={"end": clip["start"] + 60}).status_code == 200
+    assert c.put(f"/api/projects/{pid}/clips/{cid}", json={"end": clip["start"] + 120}).status_code == 400
+    assert c.post(f"/api/projects/{pid}/more", json={"videos": 20}).status_code == 400
+    assert len(c.post(f"/api/projects/{pid}/autoselect", json={"count": 4}).json()["plan"]) == 4
+
+
+def test_long_video_from_several_streams(fake_youtube, monkeypatch):
+    dur = 3600
+    rnd = random.Random(3)
+
+    def analyze(vid, comments=120):
+        if vid == "deadstream1":
+            raise RuntimeError("Video unavailable")
+        return {"id": vid, "title": f"Stream {vid[-1]}", "channel": "My Channel", "duration": dur, "views": 10,
+                "heatmap": [], "chapters": [], "marks": [], "tags": [], "caption_url": None, "caption_native": None}
+
+    def chat(vid, work):                 # buổi 2 ít chat hơn hẳn: vẫn phải được chọn ngang buổi 1
+        big = vid.endswith("1")
+        out = [(rnd.uniform(0, dur), "ok", 1.0) for _ in range(200)]
+        for t in range(400, dur - 200, 300):
+            out += [(t + rnd.uniform(0, 10), "bro what was that =))" if big else "vl đỉnh quá", 2.0)
+                    for _ in range(40 if big else 12)]
+        return out
+
+    monkeypatch.setattr(yt, "analyze", analyze)
+    monkeypatch.setattr(stream, "fetch_chat", chat)
+    monkeypatch.setattr(stream, "fetch_loudness", lambda vid, work, stop: np.full(dur, -30.0, dtype=np.float32))
+    c = TestClient(server.app)
+    links = ["https://youtu.be/aaaaaaaaaa1", "https://www.youtube.com/live/aaaaaaaaaa2", "deadstream1"]
+    r = c.post("/api/projects", json={"keyword": "stream", "streams": links, "length": 30, "minutes": 4,
+                                      "shorts": False})
+    pid = r.json()["project"]["id"]
+    job = _wait(c, pid)
+    assert job["error"] is None and job["result"]["videos"] == 2 and job["result"]["failed"] == 1
+    p = c.get(f"/api/projects/{pid}").json()["project"]
+    assert p["kind"] == "long" and p["streams"] == ["aaaaaaaaaa1", "aaaaaaaaaa2", "deadstream1"]
+    assert p["title"] == "My Channel – Best Stream Moments" and any("deadstream1" in n for n in p["signals"]["notes"])
+    chosen = [x for i in p["order"] for x in p["clips"] if x["id"] == i]
+    assert len(chosen) > 3 and sum(x["end"] - x["start"] for x in chosen) >= 4 * 60 * 0.7
+    per = [sum(x["vid"] == v for x in chosen) for v in ("aaaaaaaaaa1", "aaaaaaaaaa2")]
+    assert abs(per[0] - per[1]) <= 1                                     # chia đều cho các buổi
+    assert not any("vl" in x["comment"] for x in p["clips"])             # câu chat tục không làm hook
+    key = [(p["streams"].index(x["vid"]), x["start"]) for x in chosen]
+    assert key == sorted(key)                                            # kể theo thứ tự thời gian
+    c.post(f"/api/projects/{pid}/build")
+    job = _wait(c, pid)
+    assert job["error"] is None and (server.DATA / pid / "output.mp4").exists()
+    p = c.get(f"/api/projects/{pid}").json()["project"]
+    desc = p["youtube"]["description"]
+    assert "youtu.be/aaaaaaaaaa1" in desc and "youtu.be/aaaaaaaaaa2" in desc and "#1 " not in desc
+    assert "bro what was that" in desc                                  # chương ghi câu chat + mốc giờ
+    many = ["https://youtu.be/aaaaaaaaa%02d" % i for i in range(11)]
+    assert c.post("/api/projects", json={"keyword": "s", "streams": many, "length": 30}).status_code == 400

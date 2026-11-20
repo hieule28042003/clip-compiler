@@ -4,6 +4,7 @@ Chạy: .venv/bin/uvicorn server:app --port 8790
 """
 import hashlib
 import json
+import math
 import random
 import re
 import shutil
@@ -21,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from clipmaker import compose, moments
-from clipmaker import copywrite, seo, trends, voice, ytapi
+from clipmaker import copywrite, music, seo, stream, trends, voice, ytapi
 from clipmaker import youtube as yt
 
 ROOT = Path(__file__).resolve().parent
@@ -29,6 +30,10 @@ DATA = ROOT / "data"
 DATA.mkdir(exist_ok=True)
 INTRO_LEN, OUTRO_LEN = 3.5, 3.0
 CLIP_MIN, CLIP_MAX = 3.0, 30.0
+SHORTS, SHORTS_MAX = 3, 10        # số Shorts mặc định (cắt kèm video dài) / tối đa một dự án
+STREAM_MIN, STREAM_MAX = 15.0, 90.0   # Short cắt từ stream dài hơn: cần phần dẫn + phản ứng sau khoảnh khắc
+STREAM_SHORTS = 20                    # số Shorts tối đa từ một buổi stream
+STREAM_LINKS = 10                     # số buổi stream tối đa một dự án
 WORKERS = 3                     # tải / phân tích song song vừa phải để YouTube không chặn
 # Mỗi lần quét đổi cách tìm một chút để ra video khác nhau dù cùng từ khoá.
 VARIANTS = ("", "funny", "funniest", "best moments", "compilation", "try not to laugh", "hilarious", "awkward",
@@ -109,6 +114,12 @@ def _stamp(p):
                                    [[c.get(k) for k in keys] for c, _ in _plan(p)]]).encode()).hexdigest()
 
 
+def _done(p, f):
+    if p.get("kind") == "shorts":
+        return any((f / x["file"]).exists() for x in p.get("shorts_out", []))
+    return (f / "output.mp4").exists()
+
+
 def view(p):
     f = DATA / p["id"]
     job = JOBS.get(p["id"])
@@ -118,7 +129,7 @@ def view(p):
     return {"project": p, "videos": p.get("videos", {}), "pool": round(pool, 1),
             "plan": [{"id": c["id"], "number": n} for c, n in plan],
             "total": round(total, 1),
-            "output": (f / "output.mp4").exists() and p.get("output_stamp") == _stamp(p),
+            "output": _done(p, f) and p.get("output_stamp") == _stamp(p),
             "job": {k: v for k, v in job.items() if k != "stop"} if job else None}
 
 
@@ -180,10 +191,23 @@ class CreateReq(BaseModel):
     voice: str = voice.DEFAULT_VOICE
     takes: int = 3                   # số đoạn có lời bình
     shorts: bool = True              # cắt thêm Shorts dọc từ các đoạn top khi dựng
+    kind: str = "long"               # "shorts": chỉ làm Shorts (không dựng video dài)
+    count: int = SHORTS              # số Shorts
+    reply: bool = False              # Shorts "trả lời bình luận": khung bình luận hài + đúng đoạn được nhắc + câu đáp
+    stream: str = ""                 # link một buổi stream dài: cắt Shorts từ các đoạn hay của đúng video này
+    streams: list[str] = []          # nhiều link stream: video dài / Shorts ghép từ các đoạn hay của các buổi stream
 
 
 @app.post("/api/projects")
 def create(req: CreateReq):
+    if req.stream.strip() or any(x.strip() for x in req.streams):
+        p = _new_stream(req)
+        pid = p["id"]
+        if req.auto:
+            _start_job(pid, "auto", lambda job: _auto_stream(pid, job))
+        else:
+            _start_job(pid, "scan", lambda job: _scan_stream(pid, job))
+        return view(p)
     p = _new_project(req)
     pid, count = p["id"], min(80, max(5, req.videos))
     if req.auto:
@@ -199,21 +223,157 @@ def _new_project(req: CreateReq):
         raise HTTPException(400, "Nhập từ khoá cần tìm")
     if not CLIP_MIN <= req.length <= CLIP_MAX:
         raise HTTPException(400, "Độ dài mỗi đoạn phải từ 3 đến 30 giây")
+    only = req.kind == "shorts"
     pid = uuid.uuid4().hex[:12]
     (DATA / pid).mkdir(parents=True)
     p = {"id": pid, "created": time.time(), "keyword": kw, "title": kw.title(), "length": req.length,
+         "kind": "shorts" if only else "long", "count": min(SHORTS_MAX, max(1, req.count)),
          "minutes": min(30, max(3, req.minutes)), "countdown": True, "credits": True, "comments": req.comments,
          "subtitles": True, "thumb_text": "", "ref": req.ref[:200], "shorts": req.shorts,
          "voiceover": req.voiceover, "voice": req.voice if req.voice in voice.VOICES else voice.DEFAULT_VOICE,
          "takes": min(10, max(1, req.takes)), "auto": req.auto,
          "seed_videos": [v for v in req.seed_videos if re.fullmatch(r"[\w-]{11}", v)][:15],
          "videos": {}, "clips": [], "order": []}
+    if only:                             # Shorts: đoạn hay nhất trước, không đếm ngược, không lời bình
+        p.update(countdown=False, shorts=True, voiceover=False)
+        if req.reply:                    # cần bình luận có mốc giờ của video gốc
+            p.update(reply=True, comments=True, title="💬 " + p["title"])
     save(p)
     return p
 
 
+def _new_stream(req: CreateReq):
+    vids = []
+    for url in [req.stream, *req.streams]:
+        if not url.strip():
+            continue
+        try:
+            vid = stream.video_id(url)
+        except ValueError:
+            raise HTTPException(400, f"Link không hợp lệ: {url.strip()[:80]}") from None
+        if vid not in vids:
+            vids.append(vid)
+    if len(vids) > STREAM_LINKS:
+        raise HTTPException(400, f"Tối đa {STREAM_LINKS} buổi stream một lần")
+    if not STREAM_MIN <= req.length <= STREAM_MAX:
+        raise HTTPException(400, "Mỗi đoạn cắt từ stream phải dài từ 15 đến 90 giây")
+    only = req.kind == "shorts"
+    pid = uuid.uuid4().hex[:12]
+    (DATA / pid).mkdir(parents=True)
+    p = {"id": pid, "created": time.time(), "keyword": "stream", "title": f"📺 Stream {vids[0]}", "length": req.length,
+         "kind": "shorts" if only else "long", "stream": vids[0], "streams": vids,
+         "count": min(STREAM_SHORTS if only else SHORTS_MAX, max(1, req.count)), "minutes": min(30, max(3, req.minutes)),
+         "countdown": False, "credits": True, "comments": True, "subtitles": True, "thumb_text": "", "ref": "",
+         "shorts": True if only else req.shorts, "voiceover": False, "voice": voice.DEFAULT_VOICE, "takes": 1,
+         "auto": req.auto, "seed_videos": [], "videos": {}, "clips": [], "order": []}
+    save(p)
+    return p
+
+
+def _stream_one(vid, f, n, length, job):
+    """Một buổi stream: chat phát lại + độ to âm thanh + "Most replayed" + bình luận có mốc giờ -> các đoạn hay."""
+    work = _fresh_dir(f / "stream")
+    job["stage"] = "Đang đọc thông tin stream"
+    info = yt.analyze(vid, 150)
+    if info["duration"] < 10 * 60:
+        raise RuntimeError("Video ngắn hơn 10 phút — chế độ này dành cho stream / video dài")
+    notes = []
+    job["progress"] = 0.08
+    job["stage"] = "Đang tải chat phát lại"
+    try:
+        chat = stream.fetch_chat(vid, work)
+    except Exception:  # noqa: BLE001 - chat là tín hiệu phụ: lỗi thì chấm bằng tín hiệu khác
+        chat = []
+    if not chat:
+        notes.append("không có chat phát lại")
+    if job["stop"]:
+        raise InterruptedError
+    job["progress"] = 0.3
+    job["stage"] = f"Đang tải tiếng & đo độ to ({info['duration'] // 3600:.0f} giờ {info['duration'] % 3600 // 60:.0f} phút stream, khoảng 1–3 phút)"
+    try:
+        db = stream.fetch_loudness(vid, work, lambda: job["stop"])
+    except InterruptedError:
+        raise
+    except Exception:  # noqa: BLE001
+        db = None
+        notes.append("không đo được âm thanh")
+    shutil.rmtree(work, ignore_errors=True)
+    if not chat and db is None and not info["heatmap"] and not info["marks"]:
+        raise RuntimeError("Không lấy được dữ liệu nào của stream (chat, âm thanh, Most replayed, bình luận)")
+    job["progress"] = 0.9
+    job["stage"] = "Đang chấm điểm từng giây"
+    score, parts = stream.curve(info["duration"], chat, db, info["heatmap"], info["marks"])
+    found = stream.highlights(info["duration"], score, parts, db, chat, info["marks"], length, n)
+    v = {k: info.get(k) for k in ("id", "title", "channel", "duration", "views", "tags")}
+    v.update(caption_url=info.get("caption_native") or info.get("caption_url"), heat=bool(info["heatmap"]))
+    sig = {"chat": len(chat), "loud": db is not None, "heat": bool(info["heatmap"]), "marks": len(info["marks"]),
+           "notes": notes}
+    return v, found, sig
+
+
+def _scan_stream(pid, job):
+    """Các buổi stream của dự án -> các đoạn hay (đủ cho số Shorts / thời lượng video dài)."""
+    p = load(pid)
+    vids, f = p.get("streams") or [p["stream"]], folder(pid)
+    if p["kind"] == "shorts":
+        need = p["count"]
+    else:                                # video dài: đủ thời lượng, dư 60% để còn chọn / bỏ
+        need = math.ceil((p["minutes"] * 60 - INTRO_LEN - OUTRO_LEN) / p["length"] * 1.6)
+    n = max(8, math.ceil(max(12, need * 2 if p["kind"] == "shorts" else need) / len(vids)) + 2)
+    videos, clips, sigs, errors = {}, [], [], []
+    for i, vid in enumerate(vids):
+        part = _Part(job, i / len(vids), (i + 1) / len(vids))
+        try:
+            v, found, sig = _stream_one(vid, f, n, p["length"], part)
+        except InterruptedError:
+            raise
+        except Exception as e:  # noqa: BLE001 - một buổi lỗi (bị xoá, riêng tư…): vẫn dùng các buổi khác
+            if len(vids) == 1:
+                raise
+            errors.append(f"{vid}: {str(e)[:120]}")
+            continue
+        if len(vids) > 1:
+            job["stage"] = f"Xong stream {i + 1}/{len(vids)}"
+        videos[vid] = v
+        if len(vids) > 1:
+            sig["notes"] = [f"buổi {i + 1}: {n_}" for n_ in sig["notes"]]
+        sigs.append(sig)
+        clips += [{"id": f"{vid}_{h['peak']}", "vid": vid, **h, "caption": "", "include": False} for h in found]
+    if not clips:
+        raise RuntimeError("Không tìm được đoạn nào nổi bật trong stream" + (f" ({'; '.join(errors)})" if errors else ""))
+    p = load(pid)
+    p["videos"] = videos
+    p["clips"] = sorted(clips, key=lambda c: -c["score"])
+    chans = list(dict.fromkeys(v["channel"] for v in videos.values() if v.get("channel")))
+    first = next(iter(videos.values()))
+    p["keyword"] = ", ".join(chans[:3]) or first["title"]
+    if p["kind"] == "shorts":
+        p["title"] = "📺 " + first["title"][:90]
+    else:                                # video dài: tên kênh + "stream highlights" (tiêu đề YouTube viết riêng sau)
+        p["title"] = (f"{chans[0]} – Best Stream Moments" if chans else first["title"][:90]) if len(videos) > 1 \
+            else first["title"][:90]
+    p["signals"] = {"chat": sum(x["chat"] for x in sigs), "loud": any(x["loud"] for x in sigs),
+                    "heat": any(x["heat"] for x in sigs), "marks": sum(x["marks"] for x in sigs),
+                    "notes": list(dict.fromkeys(n_ for x in sigs for n_ in x["notes"])) + errors}
+    _autoselect(p, p["minutes"])
+    save(p)
+    job["progress"] = 1.0
+    return {"videos": len(videos), "clips": len(clips), "failed": len(errors), "chat": p["signals"]["chat"]}
+
+
+def _auto_stream(pid, job):
+    _scan_stream(pid, _Part(job, 0.0, 0.4))
+    return _build(pid, _Part(job, 0.4, 1.0))
+
+
 def _planned(p):
     return sum(c["end"] - c["start"] for c, _ in _plan(p)) + INTRO_LEN + OUTRO_LEN
+
+
+def _enough(p):
+    if p.get("kind") == "shorts":
+        return len(p["order"]) >= p.get("count", SHORTS)
+    return _planned(p) >= p["minutes"] * 60 * 0.85
 
 
 def _auto(pid, count, job):
@@ -221,7 +381,7 @@ def _auto(pid, count, job):
     _scan(pid, count, _Part(job, 0.0, 0.3), fresh=True)
     for k in range(2):
         p = load(pid)
-        if _planned(p) >= p["minutes"] * 60 * 0.85:
+        if _enough(p):
             break
         try:
             _scan(pid, 20, _Part(job, 0.3 + 0.05 * k, 0.35 + 0.05 * k), fresh=False)
@@ -231,7 +391,7 @@ def _auto(pid, count, job):
         _autoselect(p, p["minutes"])
         save(p)
     note = ""
-    if load(pid).get("voiceover"):
+    if load(pid).get("voiceover") and load(pid).get("kind") != "shorts":
         try:
             _tts(pid, _Part(job, 0.4, 0.45))
         except Exception as e:          # mất mạng / dịch vụ giọng đọc lỗi: vẫn dựng, không có lời bình
@@ -247,7 +407,8 @@ class MoreReq(BaseModel):
 @app.post("/api/projects/{pid}/more")
 def scan_more(pid: str, req: MoreReq):
     """Quét thêm video mới (bỏ qua video đã quét) khi chưa đủ đoạn cho thời lượng mong muốn."""
-    load(pid)
+    if load(pid).get("stream"):
+        raise HTTPException(400, "Dự án cắt từ stream chỉ dùng một video")
     return _start_job(pid, "scan", lambda job: _scan(pid, min(80, max(5, req.videos)), job, fresh=False))
 
 
@@ -320,14 +481,40 @@ def _scan(pid, count, job, fresh):
 
 
 def _autoselect(p, minutes):
-    """Chọn đoạn điểm cao nhất tới đủ thời lượng; đoạn hay nhất để cuối (#1), tối đa 3 đoạn mỗi video."""
+    """Chọn đoạn điểm cao nhất tới đủ thời lượng; đoạn hay nhất để cuối (#1), tối đa 3 đoạn mỗi video.
+    Dự án Shorts: `count` đoạn hay nhất, mỗi video gốc 1 đoạn, hay nhất trước."""
+    if p.get("kind") == "shorts":
+        rnd = random.Random()
+        picked, vids = [], set()
+        if p.get("reply"):               # trả lời bình luận: bình luận hài / nhiều like nhất, đoạn phải có bình luận
+            key = lambda c: -copywrite.reply_score(c.get("comment", ""), c.get("c_likes", 0)) * rnd.uniform(0.9, 1.1)
+            pool = [c for c in p["clips"] if copywrite.reply_score(c.get("comment", ""), c.get("c_likes", 0)) >= 0]
+        else:
+            key = lambda c: -c["score"] * rnd.uniform(0.85, 1.15)
+            pool = p["clips"]
+        if p.get("stream"):              # cắt từ một stream: nhiều đoạn cùng video, hay nhất trước
+            key = lambda c: -c["score"]
+        for c in sorted(pool, key=key):
+            if (p.get("stream") or c["vid"] not in vids) and len(picked) < p.get("count", SHORTS):
+                picked.append(c)
+                vids.add(c["vid"])
+        for c in p["clips"]:
+            c["include"] = c in picked
+        p["order"] = [c["id"] for c in picked]
+        return
     budget = minutes * 60 - INTRO_LEN - OUTRO_LEN
     picked, per_video, used = [], {}, 0.0
     rnd = random.Random()            # mỗi lần chọn lại hơi khác: điểm nhân hệ số ngẫu nhiên
-    for c in sorted(p["clips"], key=lambda c: -c["score"] * rnd.uniform(0.7, 1.3)):
+    pool = sorted(p["clips"], key=lambda c: -c["score"] * rnd.uniform(0.7, 1.3))
+    if p.get("stream"):              # nhiều buổi stream: lần lượt đoạn hay nhất của từng buổi (buổi có chat điểm cao
+        rank, seen = {}, {}          # hơn hẳn buổi không có, so thẳng thì một buổi chiếm hết)
+        for c in pool:
+            rank[c["id"]] = seen[c["vid"]] = seen.get(c["vid"], -1) + 1
+        pool.sort(key=lambda c: rank[c["id"]])
+    for c in pool:
         if used >= budget:
             break
-        if per_video.get(c["vid"], 0) >= 3:
+        if per_video.get(c["vid"], 0) >= 3 and not p.get("stream"):
             continue
         picked.append(c)
         per_video[c["vid"]] = per_video.get(c["vid"], 0) + 1
@@ -336,6 +523,9 @@ def _autoselect(p, minutes):
     asc = sorted(picked, key=lambda c: c["score"])
     if len(asc) > 3:
         asc.insert(0, asc.pop(-2))
+    if p.get("stream") and not p.get("countdown", True):     # tổng hợp stream: kể lại theo thứ tự thời gian
+        streams = p.get("streams") or [p["stream"]]
+        asc = sorted(picked, key=lambda c: (streams.index(c["vid"]) if c["vid"] in streams else 0, c["start"]))
     for c in p["clips"]:
         c["include"] = False
     for c in asc:
@@ -349,7 +539,7 @@ def list_projects():
     for pj in sorted(DATA.glob("*/project.json"), key=lambda x: x.stat().st_mtime, reverse=True):
         p = json.loads(pj.read_text(encoding="utf-8"))
         out.append({"id": p["id"], "title": p["title"], "keyword": p["keyword"], "created": p["created"],
-                    "clips": len(p["order"]), "done": (pj.parent / "output.mp4").exists()})
+                    "clips": len(p["order"]), "done": _done(p, pj.parent), "kind": p.get("kind", "long")})
     return out
 
 
@@ -360,6 +550,7 @@ TRENDS = "_trends"                # khoá job (không phải dự án)
 class TrendReq(BaseModel):
     seed: str = "funny moments"
     depth: int = 10
+    period: str = "month"            # "week": video đăng 7 ngày qua, "month": 30 ngày qua
 
 
 @app.post("/api/trends")
@@ -369,7 +560,7 @@ def start_trends(req: TrendReq):
         raise HTTPException(400, "Nhập lĩnh vực cần nghiên cứu")
 
     def work(job):
-        res = trends.research(seed, min(20, max(4, req.depth)), job)
+        res = trends.research(seed, min(20, max(4, req.depth)), job, "week" if req.period == "week" else "month")
         tmp = DATA / "trends.tmp.json"
         tmp.write_text(json.dumps(res, ensure_ascii=False), encoding="utf-8")
         tmp.replace(DATA / "trends.json")
@@ -447,8 +638,9 @@ def edit_clip(pid: str, cid: str, e: ClipEdit):
     dur = p["videos"][c["vid"]]["duration"]
     start = c["start"] if e.start is None else round(max(0.0, e.start), 1)
     end = c["end"] if e.end is None else round(min(dur, e.end), 1)
-    if not CLIP_MIN <= end - start <= CLIP_MAX:
-        raise HTTPException(400, "Mỗi đoạn phải dài từ 3 đến 30 giây")
+    lo, hi = (STREAM_MIN, STREAM_MAX) if p.get("stream") else (CLIP_MIN, CLIP_MAX)
+    if not lo <= end - start <= hi:
+        raise HTTPException(400, f"Mỗi đoạn phải dài từ {lo:.0f} đến {hi:.0f} giây")
     c["start"], c["end"] = start, end
     if e.caption is not None:
         c["caption"] = e.caption.strip()[:120]
@@ -460,13 +652,16 @@ def edit_clip(pid: str, cid: str, e: ClipEdit):
 
 
 class AutoReq(BaseModel):
-    minutes: int
+    minutes: int = 15
+    count: int | None = None                # dự án Shorts: số Shorts
 
 
 @app.post("/api/projects/{pid}/autoselect")
 def autoselect(pid: str, req: AutoReq):
     p = load(pid)
     p["minutes"] = min(30, max(1, req.minutes))
+    if req.count:
+        p["count"] = min(STREAM_SHORTS if p.get("stream") else SHORTS_MAX, max(1, req.count))
     _autoselect(p, p["minutes"])
     save(p)
     return view(p)
@@ -600,24 +795,17 @@ def _ts(t):
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
-@app.post("/api/projects/{pid}/build")
-def build(pid: str):
-    if not load(pid)["order"]:
-        raise HTTPException(400, "Chưa chọn đoạn nào")
-    return _start_job(pid, "build", lambda job: _build(pid, job))
+def _fresh_dir(d):
+    if d.exists():
+        shutil.rmtree(d)
+    d.mkdir()
+    return d
 
 
-def _build(pid, job):
-    p = load(pid)
-    if not p["order"]:
-        raise RuntimeError("Không chọn được đoạn nào")
-    f = folder(pid)
-    plan = _plan(p)
-    raw_dir, seg_dir = f / "raw", f / "seg"
+def _fetch(f, plan, job, full=True):
+    """Tải các đoạn của plan (lưu đệm ở raw/) -> (plan chỉ còn đoạn tải được, {id: file}, [id lỗi])."""
+    raw_dir = f / "raw"
     raw_dir.mkdir(exist_ok=True)
-    if seg_dir.exists():
-        shutil.rmtree(seg_dir)
-    seg_dir.mkdir()
     # 1. tải các đoạn (song song, có lưu đệm: dựng lại không phải tải lại)
     job["stage"] = "Đang tải các đoạn video"
     raws = {}
@@ -633,7 +821,7 @@ def _build(pid, job):
                 raise yt.Blocked("skip")
             tmp = raw_dir / ("tmp_" + path.name)
             try:
-                yt.download(c["vid"], c["start"], c["end"], tmp)
+                yt.download(c["vid"], c["start"], c["end"], tmp, full=full)
             except yt.Blocked:
                 blocked.set()
                 raise
@@ -664,17 +852,40 @@ def _build(pid, job):
     if len(failed) > total * 0.3:
         raise RuntimeError(f"Chỉ tải được {len(plan)}/{total} đoạn (mạng lỗi hoặc video bị xoá / chặn). "
                            "Bấm Dựng lại để tải tiếp phần còn thiếu, hoặc bỏ bớt đoạn lỗi.")
+    return plan, raws, failed
+
+
+@app.post("/api/projects/{pid}/build")
+def build(pid: str):
+    if not load(pid)["order"]:
+        raise HTTPException(400, "Chưa chọn đoạn nào")
+    return _start_job(pid, "build", lambda job: _build(pid, job))
+
+
+def _build(pid, job):
+    p = load(pid)
+    if not p["order"]:
+        raise RuntimeError("Không chọn được đoạn nào")
+    f = folder(pid)
+    plan = _plan(p)
+    if p.get("kind") == "shorts":
+        return _build_shorts(pid, p, f, plan, job)
+    seg_dir = _fresh_dir(f / "seg")
+    plan, raws, failed = _fetch(f, plan, job, full=not p.get("stream"))
     if failed and p.get("countdown", True):     # đánh số lại cho liền mạch
         plan = [(c, len(plan) - k) for k, (c, _) in enumerate(plan)]
     # phụ đề: luôn lấy vì lời dẫn mô tả + hook của Shorts trích câu thoại từ đây
     job["stage"] = "Đang lấy phụ đề"
     words = _words(p, f, {c["vid"] for c, _ in plan})
+    # tổng hợp stream theo thời gian: không đánh số, chương ghi câu chat / mốc giờ trong stream
+    stream_mix = bool(p.get("stream")) and not p.get("countdown", True)
     # 2. đưa từng đoạn về khung chuẩn + bình luận
     job["stage"] = "Đang dựng từng đoạn"
     parts, chapters, copy_items, t = [], [], [], 0.0
     first_frame = seg_dir / "first.png"
     compose.run(["-ss", "1", "-i", str(raws[plan[0][0]["id"]]), "-frames:v", "1", "-update", "1", str(first_frame)])
-    intro = compose.title_card(first_frame, p["title"], f"Top {len(plan)}", seg_dir / "intro.png")
+    intro = compose.title_card(first_frame, p["title"], f"{len(plan)} best moments" if stream_mix else f"Top {len(plan)}",
+                               seg_dir / "intro.png")
     parts.append(compose.still_segment(intro, seg_dir / "000_intro.mp4", INTRO_LEN))
     t += INTRO_LEN
     chapters.append((0.0, "Intro"))
@@ -682,7 +893,7 @@ def _build(pid, job):
         if job["stop"]:
             raise InterruptedError
         v = p["videos"][c["vid"]]
-        ov = compose.overlay(num, v["channel"] if p.get("credits", True) else "",
+        ov = compose.overlay(None if stream_mix else num, v["channel"] if p.get("credits", True) else "",
                              v["title"] if p.get("credits", True) else "", c.get("caption", ""))
         ov_png = seg_dir / f"ov_{k}.png"
         ov.save(ov_png)
@@ -690,7 +901,13 @@ def _build(pid, job):
         seg = compose.clip_segment(raws[c["id"]], seg_dir / f"{k + 1:03d}_clip.mp4", 0.0, c["end"] - c["start"],
                                    ov_png, seg_dir, subs)
         parts.append(seg)
-        chapters.append((t, f"#{num} {v['title'][:60]}", c, v))
+        if stream_mix:
+            # tên chương: câu chat tiêu biểu, không có thì câu streamer nói lúc đó, cuối cùng mới tới tên stream
+            line = (copywrite.clean_comment(c.get("comment", "")) or copywrite.spoken_line(words.get(c["vid"], []), c)
+                    or v["title"][:50])
+            chapters.append((t, f"{copywrite._short(line, 60)} ({_ts(c['start'])})", c, v))
+        else:
+            chapters.append((t, f"#{num} {v['title'][:60]}", c, v))
         copy_items.append({"num": num, "ts": _ts(t), "line": copywrite.spoken_line(words.get(c["vid"], []), c),
                            "comment": copywrite.clean_comment(c.get("comment", ""))})
         t += compose.probe(seg)["duration"]
@@ -728,7 +945,7 @@ def _build(pid, job):
                 "sources": "\n".join(f"- {t_} — {ch} https://youtu.be/{vid}" for t_, ch, vid in sources),
                 "research": seo.research(p["keyword"]), "names": [n for n in found if n.lower() in in_plan],
                 "source_tags": used_tags, "channels": sorted({v["channel"] for v in used if v.get("channel")}),
-                "context": " ".join([v["title"] for v in used] + used_tags)}
+                "context": " ".join([v["title"] for v in used] + used_tags), "stream": stream_mix}
     youtube = copywrite.make(**copy_src)
     # thumbnail: khung hình "hành động" (mặt người to + chuyển động mạnh) quanh đỉnh của các đoạn điểm cao,
     # ưu tiên đoạn từ video có tên người / chủ đề chính; chữ ngắn kiểu giật tít
@@ -767,34 +984,77 @@ def _build(pid, job):
             "shorts": len(short_items)}
 
 
-SHORTS = 3
-
-
-def _shorts(p, f, plan, raws, words, copy_items, seg_dir, job):
-    """Cắt các đoạn top thành video dọc 1080x1920 cho YouTube Shorts (kèm hook + phụ đề, kéo về video dài)."""
+def _shorts(p, f, plan, raws, words, copy_items, seg_dir, job, lo=0.85, hi=0.95):
+    """Cắt các đoạn top thành video dọc 1080x1920 cho YouTube Shorts (kèm hook + phụ đề).
+    Có video dài: nút "FULL VIDEO ON MY CHANNEL" + số thứ tự; dự án chỉ Shorts: "FOLLOW FOR MORE"."""
     for old in f.glob("short_*.mp4"):
         old.unlink()
+    only = p.get("kind") == "shorts"
     by_num = {x["num"]: x for x in copy_items}
-    top = sorted(plan, key=lambda x: x[1] if p.get("countdown", True) else -x[0]["score"])[:SHORTS]
+    top = plan if only else sorted(plan, key=lambda x: x[1] if p.get("countdown", True) else -x[0]["score"])
+    top = top[:p.get("count", SHORTS)]
     rnd = random.Random(p["id"])
-    out = []
+    out, used = [], set()
     for i, (c, num) in enumerate(top, 1):
         if job["stop"]:
             raise InterruptedError
         job["stage"] = f"Đang cắt Shorts {i}/{len(top)}"
         v = p["videos"][c["vid"]]
-        hook = copywrite.short_hook(by_num.get(num, {}), rnd)
         ov = seg_dir / f"short_ov_{i}.png"
-        compose.short_overlay(hook, "FULL VIDEO ON MY CHANNEL", num).save(ov)
+        extra, voice_mp3 = {}, None
+        if p.get("reply") and copywrite.reply_text(c.get("comment", "")):
+            text = copywrite.reply_text(c["comment"])
+            hook = copywrite.reply_line(c["comment"], rnd, used)
+            compose.reply_overlay(c.get("author", ""), text, hook, "FOLLOW FOR MORE").save(ov)
+            try:                                       # câu đáp đọc bằng giọng (cần mạng); lỗi thì chỉ hiện chữ
+                voice_mp3 = voice.speak(voice._speakable(hook) or hook, seg_dir / f"reply_{i}.mp3", p.get("voice"))
+            except Exception:  # noqa: BLE001
+                voice_mp3 = None
+            extra = {"reply": hook, "comment": text, "author": c.get("author", "")}
+        else:
+            hook = copywrite.short_hook(by_num.get(num, {}), rnd, used)
+            compose.short_overlay(hook, "FOLLOW FOR MORE" if only else "FULL VIDEO ON MY CHANNEL",
+                                  None if only else num).save(ov)
+        used.add(hook)
         subs = yt.chunks(words.get(c["vid"], []), c["start"], c["end"])
         try:
-            compose.short_segment(raws[c["id"]], f / f"short_{i}.mp4", c["end"] - c["start"], ov, seg_dir, subs)
+            compose.short_segment(raws[c["id"]], f / f"short_{i}.mp4", c["end"] - c["start"], ov, seg_dir, subs,
+                                  voice_mp3=voice_mp3)
         except RuntimeError:
             continue
         out.append({"file": f"short_{i}.mp4", "num": num, "hook": hook, "title": v["title"],
-                    "channel": v["channel"], "vid": c["vid"]})
-        job["progress"] = 0.85 + 0.1 * i / len(top)
+                    "channel": v["channel"], "vid": c["vid"], **extra})
+        job["progress"] = lo + (hi - lo) * i / len(top)
     return out
+
+
+def _build_shorts(pid, p, f, plan, job):
+    """Dự án chỉ Shorts: tải đoạn -> phụ đề -> cắt dọc -> tiêu đề, mô tả, tag cho từng Short."""
+    seg_dir = _fresh_dir(f / "seg")
+    plan, raws, failed = _fetch(f, plan, job, full=not p.get("stream"))   # stream vài giờ: không tải cả video
+    job["stage"] = "Đang lấy phụ đề"
+    words = _words(p, f, {c["vid"] for c, _ in plan})
+    items = [{"num": n, "line": copywrite.spoken_line(words.get(c["vid"], []), c),
+              "comment": copywrite.clean_comment(c.get("comment", ""))} for c, n in plan]
+    out = _shorts(p, f, plan, raws, words, items, seg_dir, job, 0.5, 0.95)
+    shutil.rmtree(seg_dir, ignore_errors=True)
+    if not out:
+        raise RuntimeError("Không cắt được Short nào")
+    _remember(plan)
+    job["stage"] = "Đang viết tiêu đề & tag"
+    used = [p["videos"][v] for v in dict.fromkeys(c["vid"] for c, _ in plan)]
+    used_tags = [t for v in used for t in v.get("tags") or []]
+    names = seo.names([v["title"] for v in used], tags=used_tags, weights=[2] * len(used))
+    research = seo.research(p["keyword"])
+    tags = seo.tags(p["keyword"].lower(), p["keyword"], research.get("phrases", []), names, used_tags,
+                    sorted({v["channel"] for v in used if v.get("channel")}))
+    metas = copywrite.shorts(out, None, names, seed=p["id"])
+    cur = load(pid)
+    cur.update(output_stamp=_stamp(p), failed=failed, shorts_out=[{**x, **m} for x, m in zip(out, metas)],
+               youtube={"title": metas[0]["title"], "tags": ", ".join(tags), "names": names})
+    save(cur)
+    job["progress"] = 1.0
+    return {"clips": len(plan), "failed": len(failed), "duration": 0, "shorts": len(out)}
 
 
 @app.post("/api/projects/{pid}/copy")
@@ -831,7 +1091,7 @@ def job_status(pid: str):
 @app.get("/api/projects/{pid}/files/{name}")
 def files(pid: str, name: str, download: bool = False):
     if name not in ("output.mp4", "thumbnail.jpg", "thumb_1.jpg", "thumb_2.jpg", "thumb_3.jpg",
-                    *(f"short_{i}.mp4" for i in range(1, SHORTS + 1))):
+                    *(f"short_{i}.mp4" for i in range(1, STREAM_SHORTS + 1))):
         raise HTTPException(404)
     path = folder(pid) / name
     if not path.exists():
@@ -852,6 +1112,424 @@ def files(pid: str, name: str, download: bool = False):
 def delete(pid: str):
     shutil.rmtree(folder(pid))
     JOBS.pop(pid, None)
+    return {"ok": True}
+
+
+# ---------- 🎵 ghép nhạc: bài hot theo quốc gia + thể loại -> một video dài ----------
+MIXES = DATA / "mixes"
+MUSIC_CACHE = DATA / "music_cache"          # tiếng đã tải + chuẩn hoá, ảnh bìa: dùng lại cho các bản mix sau
+MIX_FADE = (0, 2, 3, 5, 8)
+MIX_PERIODS = ("all", "month", "week")
+MUSIC_LOCK = threading.Lock()
+
+
+def _music_hist_file():
+    return DATA / "music_history.json"
+
+
+def _music_used():
+    """Các bài (theo phiên bản) đã dùng trong bản mix đã dựng: {"remix": [khoá bài…], …}."""
+    try:
+        return json.loads(_music_hist_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _music_remember(version, tracks):
+    with MUSIC_LOCK:
+        h = _music_used()
+        keys = h.setdefault(version, [])
+        keys += [k for k in (music.song_key(t.get("base") or t["song"]) for t in tracks) if k and k not in keys]
+        tmp = _music_hist_file().with_suffix(".tmp")
+        tmp.write_text(json.dumps(h, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(_music_hist_file())
+
+
+def _mix_dir(mid):
+    f = MIXES / mid
+    if not mid.isalnum() or not (f / "mix.json").exists():
+        raise HTTPException(404, "Không tìm thấy bản mix")
+    return f
+
+
+def _mix_load(mid):
+    return json.loads((_mix_dir(mid) / "mix.json").read_text(encoding="utf-8"))
+
+
+def _mix_save(m):
+    path = MIXES / m["id"] / "mix.json"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(m, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _mix_job(mid):
+    return "mix_" + mid
+
+
+def _mix_stamp(m):
+    return hashlib.md5(json.dumps([m["order"], m["fade"], m.get("bg"), m.get("style"),
+                                   [m["tracks"][i].get("artist") for i in m["order"] if i in m["tracks"]],
+                                   [m["tracks"][i].get("song") for i in m["order"] if i in m["tracks"]]])
+                       .encode()).hexdigest()
+
+
+def _mix_view(m):
+    job = JOBS.get(_mix_job(m["id"]))
+    tracks = [m["tracks"][i] for i in m["order"] if i in m["tracks"]]
+    if m.get("style") == "mashup":      # ~32 phách mỗi bài ở ~120 BPM
+        total = len(tracks) * (music.MASH_BEATS - music.MASH_XFADE) * 0.5
+    else:
+        total = sum(t["duration"] for t in tracks) - m["fade"] * max(0, len(tracks) - 1)
+    return {"mix": m, "tracks": tracks, "total": round(max(0, total)),
+            "output": (MIXES / m["id"] / "output.mp4").exists() and m.get("output_stamp") == _mix_stamp(m),
+            "job": {k: v for k, v in job.items() if k != "stop"} if job else None}
+
+
+@app.get("/api/music/options")
+def music_options():
+    return {"countries": {k: v[0] for k, v in music.COUNTRIES.items()},
+            "genres": {k: v[0] for k, v in music.GENRES.items()},
+            "versions": {k: v[0] for k, v in music.VERSIONS.items()}, "fades": MIX_FADE,
+            "used": {k: len(v) for k, v in _music_used().items()}}
+
+
+class MixReq(BaseModel):
+    country: str = "vn"
+    genre: str = "all"
+    version: str = "original"       # bản gốc / remix / chill (lofi) / acoustic / piano của các bài hot
+    count: int = 15
+    period: str = "all"             # "all": hot nhất mọi thời điểm; "month" / "week": đang hot
+    free: bool = False              # chỉ nhạc không bản quyền (NCS…)
+    fresh: bool = True              # bỏ bài đã dùng ở các bản mix trước (cùng phiên bản)
+    fade: int = 3
+    style: str = "playlist"         # "playlist": cả bài; "mashup": điệp khúc từng bài nối khớp nhịp
+    auto: bool = False              # tìm xong dựng luôn
+
+
+@app.post("/api/mixes")
+def mix_create(req: MixReq):
+    if req.country not in music.COUNTRIES or req.genre not in music.GENRES or req.version not in music.VERSIONS:
+        raise HTTPException(400, "Quốc gia / thể loại / phiên bản không hợp lệ")
+    mid = uuid.uuid4().hex[:12]
+    (MIXES / mid).mkdir(parents=True)
+    m = {"id": mid, "created": time.time(), "country": req.country, "genre": req.genre,
+         "count": min(40, max(3, req.count)), "period": req.period if req.period in MIX_PERIODS else "all",
+         "version": req.version, "fresh": req.fresh, "style": "mashup" if req.style == "mashup" else "playlist",
+         "free": req.free, "fade": req.fade if req.fade in MIX_FADE else 3, "auto": req.auto,
+         "title": music.name(req.country, req.genre, req.free, req.version), "tracks": {}, "order": []}
+    _mix_save(m)
+
+    def work(job):
+        _mix_find(mid, job, 0.0, 0.15 if req.auto else 1.0)
+        if req.auto:
+            return _mix_build(mid, _Part(job, 0.15, 1.0))
+        job["progress"] = 1.0
+        return {"found": len(_mix_load(mid)["order"])}
+
+    _start_job(_mix_job(mid), "auto" if req.auto else "find", work)
+    return _mix_view(m)
+
+
+def _mix_find(mid, job, lo, hi, more=False):
+    m = _mix_load(mid)
+    want = max(5, m["count"] // 2) if more else m["count"]
+    version = m.get("version", "original")
+    used = set(_music_used().get(version, [])) if m.get("fresh", True) else set()
+    if more:                            # tìm thêm: không lấy lại bài đang có trong bản mix
+        used |= {music.song_key(t.get("base") or t["song"]) for t in m["tracks"].values()}
+    found = music.find(m["country"], m["genre"], max(1, want), m.get("period", "all"), m.get("free"),
+                       _Part(job, lo, hi), exclude=set(m["tracks"]), version=version, used=used)
+    if not found:
+        raise RuntimeError("Không tìm được bài nào" + (" mới — các bài hot đã dùng hết ở bản mix trước. Bỏ tick "
+                           "“Không lặp bài”, đổi thể loại / phiên bản, hoặc chọn “Đang hot 30 ngày qua”."
+                           if used else " (mạng lỗi hoặc YouTube chặn). Thử lại sau ít phút."))
+    cur = _mix_load(mid)
+    for v in found:
+        cur["tracks"][v["id"]] = v
+        if v["id"] not in cur["order"]:
+            cur["order"].append(v["id"])
+    _mix_save(cur)
+    return len(found)
+
+
+@app.get("/api/mixes")
+def mix_list():
+    out = []
+    for mj in sorted(MIXES.glob("*/mix.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+        m = json.loads(mj.read_text(encoding="utf-8"))
+        out.append({"id": m["id"], "title": m.get("youtube", {}).get("title") or m["title"], "created": m["created"],
+                    "songs": len(m["order"]), "done": (mj.parent / "output.mp4").exists()})
+    return out
+
+
+@app.get("/api/mixes/{mid}")
+def mix_get(mid: str):
+    return _mix_view(_mix_load(mid))
+
+
+class MixEdit(BaseModel):
+    order: list[str] | None = None
+    fade: int | None = None
+    title: str | None = None            # tiêu đề YouTube tự đặt ("" = để app tự viết)
+    track: str | None = None            # sửa tên hiển thị của một bài
+    artist: str | None = None
+    song: str | None = None
+
+
+@app.put("/api/mixes/{mid}")
+def mix_update(mid: str, e: MixEdit):
+    m = _mix_load(mid)
+    if e.order is not None:
+        m["order"] = [i for i in dict.fromkeys(e.order) if i in m["tracks"]]
+    if e.fade is not None:
+        if e.fade not in MIX_FADE:
+            raise HTTPException(400, "Độ dài crossfade không hợp lệ")
+        m["fade"] = e.fade
+    if e.title is not None:             # đổi tiêu đề: viết lại mô tả ngay, không phải dựng lại video
+        m["custom_title"] = e.title.strip()[:100]
+        if m.get("timeline"):
+            done = [(m["tracks"][x["id"]], x["start"]) for x in m["timeline"] if x["id"] in m["tracks"]]
+            m["youtube"] = music.copy(m, [t for t, _ in done], [s_ for _, s_ in done])
+    if e.track:
+        t = m["tracks"].get(e.track)
+        if not t:
+            raise HTTPException(404, "Không có bài này")
+        if e.artist is not None:
+            t["artist"] = e.artist.strip()[:80]
+        if e.song is not None:
+            t["song"] = e.song.strip()[:100] or t["song"]
+    _mix_save(m)
+    return _mix_view(m)
+
+
+class MixAdd(BaseModel):
+    url: str
+
+
+@app.post("/api/mixes/{mid}/tracks")
+def mix_add(mid: str, req: MixAdd):
+    _mix_dir(mid)
+    try:
+        v = music.info(req.url)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    except Exception as e:  # noqa: BLE001 - video riêng tư / bị xoá / mạng lỗi
+        raise HTTPException(400, f"Không đọc được video: {str(e)[-200:]}") from None
+    if not 30 <= v["duration"] <= 15 * 60:
+        raise HTTPException(400, "Chỉ thêm được bài dài 30 giây – 15 phút")
+    m = _mix_load(mid)
+    m["tracks"][v["id"]] = v
+    if v["id"] not in m["order"]:
+        m["order"].append(v["id"])
+    _mix_save(m)
+    return _mix_view(m)
+
+
+@app.post("/api/mixes/{mid}/more")
+def mix_more(mid: str):
+    _mix_dir(mid)
+
+    def work(job):
+        n = _mix_find(mid, job, 0.0, 1.0, more=True)
+        job["progress"] = 1.0
+        return {"found": n}
+
+    return _start_job(_mix_job(mid), "find", work)
+
+
+@app.post("/api/mixes/{mid}/bg")
+async def mix_bg(mid: str, file: UploadFile = File(...)):
+    f = _mix_dir(mid)
+    raw = await file.read()
+    if len(raw) > 15_000_000:
+        raise HTTPException(400, "Ảnh quá lớn (tối đa 15 MB)")
+    try:
+        from PIL import Image
+        import io
+
+        Image.open(io.BytesIO(raw)).convert("RGB").save(f / "bg.jpg", quality=92)
+    except Exception:  # noqa: BLE001
+        raise HTTPException(400, "File không phải ảnh") from None
+    m = _mix_load(mid)
+    m["bg"] = f"bg.jpg?{int(time.time())}"
+    _mix_save(m)
+    return _mix_view(m)
+
+
+@app.delete("/api/mixes/{mid}/bg")
+def mix_bg_delete(mid: str):
+    f = _mix_dir(mid)
+    (f / "bg.jpg").unlink(missing_ok=True)
+    m = _mix_load(mid)
+    m.pop("bg", None)
+    _mix_save(m)
+    return _mix_view(m)
+
+
+@app.post("/api/mixes/{mid}/build")
+def mix_build(mid: str):
+    if not _mix_load(mid)["order"]:
+        raise HTTPException(400, "Chưa có bài nào")
+    return _start_job(_mix_job(mid), "build", lambda job: _mix_build(mid, job))
+
+
+def _mix_build(mid, job):
+    m = _mix_load(mid)
+    f = _mix_dir(mid)
+    MUSIC_CACHE.mkdir(exist_ok=True)
+    tracks = [m["tracks"][i] for i in m["order"] if i in m["tracks"]]
+    if not tracks:
+        raise RuntimeError("Chưa có bài nào")
+    mash = m.get("style") == "mashup"
+    # 1. tải tiếng (song song vừa phải, có lưu đệm) + ảnh bìa
+    job["stage"] = "Đang tải nhạc"
+    blocked = threading.Event()
+
+    def fetch(t):
+        if job["stop"]:
+            raise InterruptedError
+        if blocked.is_set():
+            raise yt.Blocked("skip")
+        try:
+            music.fetch_cover(t["id"], MUSIC_CACHE / f"{t['id']}.jpg")
+            if mash and "peak" not in t:        # mashup: đoạn "Most replayed" thường là điệp khúc
+                try:
+                    a = yt.analyze(t["id"], comments=0)
+                    t["peak"] = music.heat_peak(a["heatmap"], a["duration"])
+                except Exception:  # noqa: BLE001 - không có heatmap: tự tìm đoạn to nhất
+                    t["peak"] = None
+            return music.download_audio(t["id"], MUSIC_CACHE / f"{t['id']}.flac")
+        except yt.Blocked:
+            blocked.set()
+            raise
+
+    files, failed = {}, []
+    with ThreadPoolExecutor(WORKERS) as ex:
+        futs = [(t, ex.submit(fetch, t)) for t in tracks]
+        for i, (t, fut) in enumerate(futs):
+            try:
+                files[t["id"]] = fut.result()
+            except InterruptedError:
+                raise
+            except Exception:  # noqa: BLE001 - bài lỗi thì bỏ
+                failed.append(t["id"])
+            job["progress"] = 0.3 * (i + 1) / len(futs)
+    if blocked.is_set():
+        raise RuntimeError(f"YouTube đang tạm chặn tải (\"not a bot\"). Đã tải {len(files)}/{len(tracks)} bài. "
+                           "Đợi 30–60 phút rồi bấm Dựng lại (bài đã tải được giữ lại)"
+                           + ("." if yt.COOKIES["file"] or yt.COOKIES["browser"] else
+                              ", hoặc thêm cookie YouTube ở trang ⚙ Cài đặt."))
+    tracks = [t for t in tracks if t["id"] in files]
+    if len(tracks) < 2:
+        raise RuntimeError("Tải được quá ít bài (YouTube chặn hoặc video bị xoá)")
+    work = _fresh_dir(f / "work")
+    bpm = None
+    if mash:
+        # 2a. mashup: điệp khúc mỗi bài, đổi về cùng nhịp, nối chồng đúng 2 phách
+        job["stage"] = "Đang tìm điệp khúc + đo nhịp từng bài"
+        cuts = []
+        for i, t in enumerate(tracks):
+            if job["stop"]:
+                raise InterruptedError
+            cuts.append(music.chorus(files[t["id"]], t.get("peak")))
+            job["progress"] = 0.3 + 0.04 * (i + 1) / len(tracks)
+        # chia nhóm nhịp (chậm -> nhanh), mỗi nhóm một nhịp chung; trong nhóm giữ thứ tự hot
+        groups = music.tempo_groups([c[2] for c in cuts])
+        order = [(i, tgt) for tgt, members in groups for i in members]
+        tracks, cuts = [tracks[i] for i, _ in order], [cuts[i] for i, _ in order]
+        targets = [tgt for _, tgt in order]
+        bpm = music.common_bpm(targets)
+        job["stage"] = "Đang đưa các bài về nhịp chung: " + ", ".join(f"{g[0]:.0f} BPM" for g in groups)
+        play = []
+        for i, (t, (start, length, b), tgt) in enumerate(zip(tracks, cuts, targets)):
+            play.append(music.mash_segment(files[t["id"]], start, length, music.stretch_ratio(b, tgt),
+                                           work / f"seg_{i:03d}.flac"))
+        fade = [music.MASH_XFADE * 60 / tgt for tgt in targets[1:]]      # chồng 2 phách của bài vào
+    else:
+        play = [files[t["id"]] for t in tracks]
+        fade = m["fade"]
+    # 2. nối crossfade
+    job["stage"] = "Đang nối nhạc (crossfade)"
+    durs = [compose.probe(x)["duration"] for x in play]
+    fade = [min(x, min(durs) / 3) for x in fade] if isinstance(fade, list) else min(fade, min(durs) / 3)
+    starts, total = music.timeline(durs, fade)
+    music.mix_audio(play, work / "mix.flac", fade)
+    job["progress"] = 0.38
+    # 3. khung hình cho từng bài (đổi khung ở giữa đoạn crossfade)
+    job["stage"] = "Đang vẽ khung hình"
+    covers = [MUSIC_CACHE / f"{t['id']}.jpg" for t in tracks]
+    bg = f / "bg.jpg" if m.get("bg") and (f / "bg.jpg").exists() else None
+    base = music.background(covers, bg)
+    frames = [music.frame(base, tracks, starts, k, covers[k], work / f"frame_{k:03d}.png") for k in range(len(tracks))]
+    fades = fade if isinstance(fade, list) else [fade] * (len(tracks) - 1)
+    switch = [0.0] + [s + x / 2 for s, x in zip(starts[1:], fades)]
+    # 4. dựng video
+    job["stage"] = f"Đang dựng video {_ts(total)} (khoảng {max(1, round(total / 60 / 4))} phút)"
+    tmp = f / "output.tmp.mp4"
+
+    def prog(x):
+        job["progress"] = 0.4 + 0.57 * x
+
+    music.render(frames, switch, total, work / "mix.flac", tmp, work, prog, lambda: job["stop"])
+    tmp.replace(f / "output.mp4")
+    # 5. thumbnail + tiêu đề / mô tả
+    job["stage"] = "Đang làm thumbnail, tiêu đề, mô tả"
+    cur = _mix_load(mid)
+    y = music.copy(cur, tracks, starts, total)
+    music.thumbnail(covers, y["thumb"], y["thumb_sub"], f / "thumbnail.jpg")
+    shutil.rmtree(work, ignore_errors=True)
+    _music_remember(m.get("version", "original"), tracks)
+    for t in tracks:                    # đỉnh "Most replayed": lưu lại, dựng lại không phải đọc lại
+        if "peak" in t and t["id"] in cur["tracks"]:
+            cur["tracks"][t["id"]]["peak"] = t["peak"]
+    if mash:                            # mashup xếp lại theo nhóm nhịp: danh sách trên web theo đúng thứ tự trong video
+        cur["order"] = [t["id"] for t in tracks] + [i for i in cur["order"] if i not in {t["id"] for t in tracks}]
+        m = {**m, "order": cur["order"]}
+    cur.update(youtube=y, output_stamp=_mix_stamp(m), failed=failed, built_total=round(total), bpm=bpm,
+               bpm_groups=[round(g[0]) for g in groups] if mash else None,
+               timeline=[{"id": t["id"], "start": round(s, 1)} for t, s in zip(tracks, starts)])
+    _mix_save(cur)
+    job["progress"] = 1.0
+    return {"songs": len(tracks), "failed": len(failed), "duration": round(total)}
+
+
+@app.post("/api/mixes/{mid}/cancel")
+def mix_cancel(mid: str):
+    _mix_dir(mid)
+    return cancel(_mix_job(mid))
+
+
+@app.get("/api/mixes/{mid}/files/{name}")
+def mix_files(mid: str, name: str, download: bool = False):
+    if name not in ("output.mp4", "thumbnail.jpg", "bg.jpg"):
+        raise HTTPException(404)
+    path = _mix_dir(mid) / name
+    if not path.exists():
+        raise HTTPException(404)
+    if download:
+        m = _mix_load(mid)
+        title = m.get("youtube", {}).get("title") or m["title"]
+        nice = "".join(ch for ch in title if ch.isalnum() or ch in " -_").strip() or "playlist"
+        return FileResponse(path, filename=f"{nice}{path.suffix}")
+    return FileResponse(path)
+
+
+@app.get("/api/music/cover/{vid}")
+def music_cover(vid: str):
+    if not re.fullmatch(r"[\w-]{11}", vid):
+        raise HTTPException(404)
+    MUSIC_CACHE.mkdir(exist_ok=True)
+    path = music.fetch_cover(vid, MUSIC_CACHE / f"{vid}.jpg")
+    if not path.exists():
+        raise HTTPException(404)
+    return FileResponse(path)
+
+
+@app.delete("/api/mixes/{mid}")
+def mix_delete(mid: str):
+    shutil.rmtree(_mix_dir(mid))
+    JOBS.pop(_mix_job(mid), None)
     return {"ok": True}
 
 
@@ -905,7 +1583,8 @@ ACC_DEFAULTS = {"enabled": True, "seeds": ["funny moments"], "mode": "hot", "min
                 "days": [0, 1, 2, 3, 4, 5, 6], "booked": [],
                 # tăng tương tác thật: tự bình luận câu hỏi dưới video khi video công khai; xoay vòng mẫu thumbnail
                 # để bảng thống kê so được mẫu nào nhiều view hơn
-                "comment": True, "thumb_style": "rotate", "uploads": []}
+                "comment": True, "thumb_style": "rotate", "uploads": [],
+                "shorts_n": SHORTS}               # số Shorts mỗi video (bỏ tick video dài = kênh chỉ làm Shorts)
 THUMB_STYLES = {"1": "Sticker", "2": "Reaction", "3": "Split"}
 HHMM = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
 MIN_LEAD = 20 * 60                 # mốc hẹn giờ phải sau lúc tải lên ít nhất 20 phút (YouTube cần thời gian xử lý)
@@ -1074,6 +1753,7 @@ class AccountCfg(BaseModel):
     days: list[int] | None = None
     comment: bool | None = None
     thumb_style: str | None = None
+    shorts_n: int | None = None
 
 
 def _slots(v, what):
@@ -1117,6 +1797,8 @@ def channel_update(cid: str, cfg: AccountCfg, request: Request):
             c["voice"] = voice.DEFAULT_VOICE
         if "minutes" in c:
             c["minutes"] = min(30, max(3, c["minutes"]))
+        if "shorts_n" in c:
+            c["shorts_n"] = min(SHORTS_MAX, max(1, c["shorts_n"]))
         if "per_run" in c:
             c["per_run"] = min(5, max(1, c["per_run"]))
         if not c.get("long", a.get("long", True)) and not c.get("shorts", a.get("shorts", True)):
@@ -1326,7 +2008,7 @@ def _pick_topic(a):
     seed = min(seeds, key=lambda s: sum(u.startswith(s + "|") for u in used))
     at, res = _TREND_CACHE.get(seed, (0, None))
     if not res or time.time() - at > 6 * 3600:
-        res = trends.research(seed, 8)
+        res = trends.research(seed, 8, deep=False)
         _TREND_CACHE[seed] = (time.time(), res)
     recent = set(used[-30:])
     for topic in res["topics"]:
@@ -1385,9 +2067,12 @@ def _task_work(t):
     t["keyword"] = ref
     if t["stop"]:
         raise InterruptedError
-    p = _new_project(CreateReq(keyword=keyword, videos=40, length=10, minutes=a.get("minutes", 10), auto=True,
+    long_ = a.get("long", True)
+    p = _new_project(CreateReq(keyword=keyword, videos=40, length=10 if long_ else 20, minutes=a.get("minutes", 10),
+                               auto=True,
                                voiceover=a.get("voiceover", True), voice=a.get("voice", voice.DEFAULT_VOICE),
                                shorts=a.get("shorts", True), seed_videos=seed_videos,
+                               kind="long" if long_ else "shorts", count=a.get("shorts_n", SHORTS),
                                ref=f"{ref} · kênh {a['title']}"))
     pid = t["project"] = p["id"]
     t["phase"] = "build"
@@ -1474,7 +2159,8 @@ def _task_work(t):
             sid = ytapi.upload(token, f / s["file"], meta, None, stop)
             t["shorts"].append(f"https://youtube.com/shorts/{sid}")
             _record(a, t, sid, "short", s["title"], at, privacy,
-                    f"🎬 Full video: {t['video']}\nWhich moment should be the next Short? 👇" if t.get("video") else None)
+                    f"🎬 Full video: {t['video']}\nWhich moment should be the next Short? 👇" if t.get("video")
+                    else s.get("pin"))
             if short_at[i]:
                 _booked_update(a, t, short_at[i], title=s["title"], url=t["shorts"][-1])
             t["progress"] = 0.8 + 0.2 * (i + 1) / len(items)

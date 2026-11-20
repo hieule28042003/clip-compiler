@@ -86,7 +86,8 @@ def find(info, length=10.0, per_video=3, min_gap=25):
         for c in info.get("chapters") or []:
             if c["start"] <= t < c["end"] and FUNNY_CHAPTER.search(c["title"]):
                 reasons.append(f"📑 Chương: {c['title'][:60]}")
+        top = max(near, key=lambda m: m["likes"]) if near else {}
         out.append({"start": round(start, 1), "end": round(end, 1), "peak": t,
-                    "score": round(float(smooth[t]), 3), "reasons": reasons,
-                    "comment": max(near, key=lambda m: m["likes"])["text"] if near else ""})
+                    "score": round(float(smooth[t]), 3), "reasons": reasons, "comment": top.get("text", ""),
+                    "author": top.get("author", ""), "c_likes": top.get("likes", 0)})
     return out

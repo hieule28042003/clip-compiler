@@ -5,6 +5,7 @@
 - Lời dẫn: câu thoại ngay trước đỉnh gây cười (phụ đề YouTube) / bình luận nhiều like nhất ở mốc đó.
 Chọn ngẫu nhiên có trọng số nên mỗi lần bấm "Viết lại" ra một bộ khác.
 """
+import math
 import random
 import re
 
@@ -114,15 +115,22 @@ BAIT_PERSON = [
     "{Xs} Most UNHINGED Moments Caught On Camera",
     "The Moments {X} Went WAY Too Far 😂",
     "{X} Moments You Won't Believe Actually Happened",
+    "{X} Was NOT Ready For This 😳",
+    "I Can't Believe {X} ACTUALLY Did This 😭",
+    "{X} Lost It… Then THIS Happened 💀",
+    "Try Not To Laugh: {X} Edition (IMPOSSIBLE) 😂",
 ]
 BAIT_TOPIC = [
     "{S} Moments That Went WAY Too Far 😂",
     "{S} Moments You Won't Believe Actually Happened",
     "Nobody Was Ready For These {S} Moments 💀",
+    "These {S} Moments Should NOT Be This Funny 😭",
+    "Try Not To Laugh: {S} Edition (IMPOSSIBLE) 😂",
 ]
-# chữ trên thumbnail: 2-4 chữ, đọc được trong 1 giây ở kích thước nhỏ
-PUNCH_PERSON = ["{X} DID WHAT?!", "{X} WENT TOO FAR", "{X} LOST IT", "WAIT… WHAT?!", "NOBODY WAS READY"]
-PUNCH_TOPIC = ["WAIT… WHAT?!", "NOBODY WAS READY", "THIS IS REAL?!", "WAY TOO FAR"]
+# chữ trên thumbnail: 2-4 chữ, đọc được trong 1 giây ở kích thước nhỏ (không bịa sự việc video không có)
+PUNCH_PERSON = ["{X} DID WHAT?!", "{X} WENT TOO FAR", "{X} LOST IT", "{X} WASN'T READY", "WAIT… WHAT?!",
+                "NO WAY!!", "NOBODY WAS READY"]
+PUNCH_TOPIC = ["WAIT… WHAT?!", "NOBODY WAS READY", "THIS IS REAL?!", "WAY TOO FAR", "NO WAY!!", "DON'T LAUGH"]
 
 CTAS = [
     "👇 Which one got you? Comment the number!",
@@ -178,7 +186,8 @@ def _titles(rnd, keyword, research, names, N, quote):
                 add(f"{base} ({year})", x["person"])
     if quote:
         add(rnd.choice(QUOTE_TITLES).format(Q=quote, P=P), "quote")
-    bait = [tpl.format(X=n, Xs=seo.possessive(n), N=N) for n in names[:1] for tpl in BAIT_PERSON] + \
+    # có tên người thì giật tít theo tên (người xem tìm theo tên), không thì theo chủ đề
+    bait = [tpl.format(X=n, Xs=seo.possessive(n), N=N) for n in names[:1] for tpl in BAIT_PERSON] or \
         [tpl.format(S=S) for tpl in BAIT_TOPIC]
     for base in bait:
         core = [w for w in seo._words(phrase) if not FILLER.fullmatch(w)]   # "trump funny moments" -> trump
@@ -206,11 +215,56 @@ def _titles(rnd, keyword, research, names, N, quote):
     return phrase, out
 
 
+# video tổng hợp các buổi livestream: kể theo thời gian, không xếp hạng
+STREAM_TITLES = ["{C} Best Stream Moments 😂 ({N} Highlights)", "{C} Funniest Stream Moments You Missed 💀",
+                 "{C} Stream Highlights: The Moments Chat Went Crazy 😂", "Best Of {C} Livestreams ({N} Moments) 🔥",
+                 "{C} Lost It On Stream… Best Moments 😭"]
+STREAM_PUNCH = ["BEST MOMENTS", "CHAT WENT CRAZY", "STREAM HIGHLIGHTS", "HE LOST IT", "NO WAY!!"]
+STREAM_ENGAGE = ["Which moment was your favorite? Drop the timestamp 👇", "What did I miss from this stream? 👇",
+                 "Which stream should I make highlights of next? 👇"]
+
+
+def _stream_copy(rnd, keyword, items, video_count, chapters_text, sources, research, names, source_tags, channels):
+    C = (channels or [keyword])[0]
+    N = len(items)
+    quote = ""
+    for x in items:
+        q = re.sub(r"[^\w\s'’!?,.-]", "", x.get("comment", "")).strip(" ,.-")
+        if 2 <= len(q.split()) <= 5 and len(q) <= 30:
+            quote = q
+            break
+    titles = []
+    for tpl in rnd.sample(STREAM_TITLES, len(STREAM_TITLES)):
+        text = tpl.format(C=C, N=N)
+        sc, checks = seo.score_title(text, f"{C} stream highlights", names, [])
+        titles.append({"text": text, "score": sc, "checks": checks})
+    hook = (f"The best moments from {video_count} {C} streams, in the order they happened." if video_count > 1
+            else f"The best moments from {C}'s stream, in the order they happened.")
+    if quote:
+        hook += f"\nChat when it happened: “{quote}”"
+    desc = (f"{C} stream highlights 😂 — {N} moments where chat went crazy." + "\n\n" + hook
+            + "\n\nPicked from the live chat replay, the loudest reactions and the most replayed parts of the stream."
+            + "\n\n" + rnd.choice(STREAM_ENGAGE)
+            + "\n\n⏱ Timestamps:\n" + chapters_text
+            + "\n\n🎬 Full streams (all credit to the streamer):\n" + sources
+            + "\n\n" + " ".join(dict.fromkeys([_hashtag(C), "#StreamHighlights", "#Livestream"])))
+    phrase = f"{C} stream highlights".lower()
+    tag_list = seo.tags(phrase, keyword, research.get("phrases", []), names, source_tags, channels)
+    punch = f'"{quote}"' if quote and len(quote.split()) <= 4 and rnd.random() < 0.4 else rnd.choice(STREAM_PUNCH)
+    return {"title": titles[0]["text"], "titles": titles, "thumb": punch.upper(), "hook": hook, "description": desc,
+            "pin": rnd.choice(STREAM_ENGAGE), "tags": ", ".join(tag_list), "phrase": phrase,
+            "searches": research.get("phrases", [])[:8], "hot": [], "names": list(names)}
+
+
 def make(keyword, items, video_count, chapters_text, sources, commentary=False, seed=None,
-         research=None, names=(), source_tags=(), channels=(), context=""):
+         research=None, names=(), source_tags=(), channels=(), context="", stream=False):
     """items: các đoạn theo thứ tự xuất hiện, mỗi phần tử {num, ts, line, comment}.
-    research: kết quả seo.research(); names: tên người nổi tiếng trong các đoạn."""
+    research: kết quả seo.research(); names: tên người nổi tiếng trong các đoạn.
+    stream: video tổng hợp các buổi livestream (kể theo thời gian, không xếp hạng)."""
     rnd = random.Random(seed)
+    if stream:
+        return _stream_copy(rnd, keyword, items, video_count, chapters_text, sources, dict(research or {}),
+                            list(names), source_tags, channels)
     research = dict(research or {})
     names = list(names)
     if context:            # chỉ dùng các gợi ý tìm kiếm mà video thật sự khớp
@@ -266,6 +320,8 @@ def make(keyword, items, video_count, chapters_text, sources, commentary=False, 
     hot = [x for x in seo.trend_scores(research.get("trend", [])) if x["hits"]]
     X = names[0].split()[-1] if names else ""
     punch = rnd.choice(PUNCH_PERSON).format(X=X) if X else rnd.choice(PUNCH_TOPIC)
+    if 2 <= len(quote.split()) <= 4 and rnd.random() < 0.4:    # câu nói thật trong video: tò mò mà vẫn đúng
+        punch = f'"{quote.rstrip(".,")}"'
     engage = [t for t in ENGAGE + (ENGAGE_PERSON if X else []) if top.get("ts") or "{ts}" not in t]
     pin = rnd.choice(engage).format(X=names[0] if names else "", ts=top.get("ts", ""))
     return {"title": titles[0]["text"] if titles else P, "titles": titles, "thumb": punch.upper(), "hook": hook_text, "description": desc,
@@ -276,29 +332,103 @@ def make(keyword, items, video_count, chapters_text, sources, commentary=False, 
 
 
 # ---------- Shorts ----------
-SHORT_HOOKS = ["Wait for it", "Nobody was ready for this", "This timing is unreal", "Watch their faces",
-               "I can't stop replaying this", "The way this ended"]
+SHORT_HOOKS = ["Wait for it…", "Nobody was ready for this", "This should NOT be this funny", "Watch their faces",
+               "I can't stop replaying this", "The way this ended", "Watch till the end", "They really said that",
+               "This went WAY too far", "Did that really just happen?!", "The face at the end", "Don't blink"]
+# tiêu đề Short: {H} là câu hook (câu nói thật / câu nhử chung)
+SHORT_TITLES = ["{H} 😳", "{H}… wait for it 💀", "{H} 😭 (watch till the end)", "{H} 💀 Nobody was ready"]
+SHORT_QUOTE_TITLES = ["They Really Said {H} 💀", "{H} 😳 Nobody Was Ready", "When They Said {H}… 😭"]
+# Short đứng riêng (không có video dài): bình luận đầu tiên kéo người xem trả lời + theo dõi kênh
+SHORT_ENGAGE = ["Rate this from 1 to 10 😂👇", "Who do you want to see next? 👇", "Did you see that coming? 👇",
+                "Tag someone who needs to see this 😂"]
 
 
-def short_hook(item, rnd):
-    """Chữ to phía trên video dọc: câu thoại / bình luận ngắn của chính đoạn đó, không có thì câu nhử chung."""
+def short_hook(item, rnd, used=()):
+    """Chữ to phía trên video dọc: câu thoại / bình luận ngắn của chính đoạn đó, không có thì câu nhử chung
+    (không lặp câu đã dùng cho Short khác)."""
     # bình luận người xem trước: phụ đề tự động hay nghe nhầm chữ
     for cand in (item.get("comment", ""), item.get("line") if item.get("line", "")[-1:] in "?!" else ""):
         q = re.sub(r"[^\w\s'’!?,.-]", "", cand or "").strip(" ,.-")
         if 2 <= len(q.split()) <= 8 and len(q) <= 44:
-            return f"\"{q}\""
-    return rnd.choice(SHORT_HOOKS)
+            if f"\"{q}\"" not in used:
+                return f"\"{q}\""
+    return rnd.choice([h for h in SHORT_HOOKS if h not in used] or SHORT_HOOKS)
 
 
-def shorts(items, main_title, names=()):
-    """items: [{num, hook, title, channel, vid}] -> tiêu đề + mô tả cho từng Short (kéo người xem về video dài)."""
+def shorts(items, main_title, names=(), seed=None):
+    """items: [{num, hook, title, channel, vid}] -> tiêu đề + mô tả cho từng Short.
+    main_title: tiêu đề video dài (kéo người xem về đó); None = Short đứng riêng (kêu gọi theo dõi kênh)."""
+    rnd = random.Random(seed)
     out = []
     for x in items:
         tag = names[0] if names else ""
-        title = f"{x['hook'].strip(chr(34))} 😂" + (f" | {tag}" if tag and tag.lower() not in x["hook"].lower() else "")
-        desc = (f"#{x['num']} from my full video: {main_title}\n"
-                f"👉 Full compilation on my channel!\n\n"
+        if x.get("reply"):
+            h = f"“{_short(x['comment'], 60)}”"
+            title = rnd.choice(REPLY_TITLES).format(H=h)
+            desc = (f"Replying to {x.get('author') or 'a viewer'}'s comment: “{x['comment']}”\n"
+                    f"{x['reply']}\n🔔 Follow for more! Drop your funniest comment and I might reply with a video 👇\n\n"
+                    f"🎬 Original: {x['title']} — {x['channel']} https://youtu.be/{x['vid']}\n\n"
+                    + " ".join(dict.fromkeys(["#shorts", "#funny", "#comments", *(_hashtag(n) for n in names[:1])])))
+            out.append({"title": title[:95] + " #shorts", "description": desc,
+                        "pin": "Comment something funny and I might reply with a video 👇😂"})
+            continue
+        quoted = x["hook"].startswith('"')
+        h = x["hook"] if quoted else x["hook"].rstrip("…")
+        pool = [t for t in (SHORT_QUOTE_TITLES if quoted else SHORT_TITLES)       # tránh "Wait for it… wait for it"
+                if not any(k in t.lower() and k in h.lower() for k in ("wait for it", "nobody was ready", "till the end"))]
+        title = rnd.choice(pool or SHORT_TITLES[:1]).format(H=h)
+        title += f" | {tag}" if tag and tag.lower() not in x["hook"].lower() else ""
+        head = (f"#{x['num']} from my full video: {main_title}\n👉 Full compilation on my channel!" if main_title
+                else f"{x['hook'].strip(chr(34))} 😂\n🔔 Follow for a new funny moment every day!")
+        desc = (head + "\n\n"
                 f"🎬 Original: {x['title']} — {x['channel']} https://youtu.be/{x['vid']}\n\n"
                 + " ".join(dict.fromkeys(["#shorts", "#funny", "#funnymoments", *(_hashtag(n) for n in names[:1])])))
-        out.append({"title": title[:95] + " #shorts", "description": desc})
+        out.append({"title": title[:95] + " #shorts", "description": desc, "pin": rnd.choice(SHORT_ENGAGE)})
     return out
+
+
+# ---------- Short trả lời bình luận ----------
+# câu đáp của kênh (hiện chữ + đọc giọng), chọn theo kiểu bình luận
+REPLY_ASK = ["You asked, so here it is 😂", "Glad you asked 💀", "Say less. Here it is 👀"]
+REPLY_MOMENT = ["Here's the exact moment 💀", "You weren't lying 😂", "Okay, let's watch it again 👀",
+                "This part right here 😭"]
+REPLY_LAUGH = ["Same. I can't breathe 😭", "This one broke all of us 💀", "Crying with you 😂"]
+REPLY_GENERIC = ["Couldn't agree more 😂", "This comment is the best part 💀", "Facts. Watch this 👀"]
+REPLY_TITLES = ["Replying to the funniest comment 😂 {H}", "{H} 💀 You asked, here it is",
+                "This comment was RIGHT 😭 {H}", "{H} 😂 Comment section won again"]
+
+
+SWEAR = re.compile(r"\b(f+u+c+k\w*|sh+i+t\w*|bitch\w*|asshole\w*|pussy\w*|bastard\w*|"
+                   r"motherf\w*|wtf|stfu)\b", re.I)
+SLUR = re.compile(r"n[i1]gg|f[a@]gg?[o0]t|retard", re.I)            # bình luận miệt thị: không dùng
+
+
+def _mask(m):
+    w = m.group(0)
+    return w if len(w) <= 2 else w[0] + "*" * (len(w) - 2) + w[-1]
+
+
+def reply_text(comment):
+    """Bình luận để hiện trong khung: bỏ mốc giờ ở đầu / link, che chữ chửi thề (YouTube hạn chế quảng cáo),
+    gọn khoảng trắng, tối đa 150 ký tự."""
+    text = SWEAR.sub(_mask, re.sub(r"https?://\S+", "", comment or ""))
+    text = re.sub(r"^\s*(?:\d{1,2}:)?\d{1,2}:\d{2}\s*[-–—:,.]*\s*", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return _short(text, 150)
+
+
+def reply_score(comment, likes):
+    """Độ "hài, lầy" của bình luận để chọn làm Short trả lời: nhiều like, có biểu tượng cười, đủ ý (không chỉ là mốc giờ)."""
+    text = reply_text(comment)
+    words = len(re.findall(r"[A-Za-z]{2,}", text))
+    if words < 3 or SLUR.search(comment or ""):
+        return -1.0
+    return (math.log1p(likes) + (2.0 if LAUGH.search(comment or "") else 0) + (1.0 if 4 <= words <= 25 else 0)
+            + (0.5 if "?" in text else 0))
+
+
+def reply_line(comment, rnd, used=()):
+    text = comment or ""
+    pool = (REPLY_ASK if "?" in text else REPLY_LAUGH if LAUGH.search(text) else
+            REPLY_MOMENT if re.search(r"\d:\d\d|\bthe way\b|\bwhen\b|\bpart\b", text, re.I) else REPLY_GENERIC)
+    return rnd.choice([x for x in pool if x not in used] or pool)

@@ -140,7 +140,8 @@ def analyze(video_id, comments=120):
     for c in info.get("comments") or []:
         text = c.get("text") or ""
         for t in timestamps(text):
-            marks.append({"t": t, "likes": c.get("like_count") or 0, "text": text[:140]})
+            marks.append({"t": t, "likes": c.get("like_count") or 0, "text": text[:240],
+                          "author": c.get("author") or ""})
     return {
         "id": video_id, "title": info.get("title") or video_id,
         "channel": info.get("channel") or info.get("uploader") or "",
@@ -149,7 +150,7 @@ def analyze(video_id, comments=120):
         "chapters": [{"start": c["start_time"], "end": c["end_time"], "title": c.get("title") or ""}
                      for c in info.get("chapters") or []],
         "marks": marks, "width": info.get("width"), "height": info.get("height"),
-        "caption_url": _caption_url(info), "tags": [t for t in info.get("tags") or [] if len(t) <= 40][:30],
+        "caption_url": _caption_url(info), "caption_native": native_captions(info), "tags": [t for t in info.get("tags") or [] if len(t) <= 40][:30],
     }
 
 
@@ -161,6 +162,17 @@ def _caption_url(info):
             if t.get("ext") == "json3":
                 return t["url"]
     return None
+
+
+def native_captions(info):
+    """Phụ đề json3 theo ngôn ngữ của video (stream tiếng Việt -> phụ đề tiếng Việt), không có thì tiếng Anh."""
+    subs, auto = info.get("subtitles") or {}, info.get("automatic_captions") or {}
+    lang = (info.get("language") or "en").split("-")[0]
+    for tracks in (subs.get(lang), auto.get(f"{lang}-orig"), auto.get(lang)):
+        for t in tracks or []:
+            if t.get("ext") == "json3":
+                return t["url"]
+    return _caption_url(info)
 
 
 NOISE = re.compile(r"\[[^\]]*\]|>>|♪")
@@ -267,8 +279,9 @@ def _blocked(msg):
     return "not a bot" in m or "http error 429" in m or "too many requests" in m
 
 
-def download(video_id, start, end, out_path, progress=lambda f: None):
-    """Tải riêng đoạn [start, end] ra MP4: thử cách nhanh 2 lần, hỏng thì tải cả video rồi cắt."""
+def download(video_id, start, end, out_path, progress=lambda f: None, full=True):
+    """Tải riêng đoạn [start, end] ra MP4: thử cách nhanh 2 lần, hỏng thì tải cả video rồi cắt
+    (full=False: không tải cả video, vd stream vài giờ nặng vài GB)."""
     out_path = Path(out_path)
 
     def hook(d):
@@ -276,7 +289,7 @@ def download(video_id, start, end, out_path, progress=lambda f: None):
             progress(d.get("downloaded_bytes", 0) / d["total_bytes"])
 
     errors = []
-    for way in (_download_section, _download_section, _download_full_then_cut):
+    for way in (_download_section, _download_section, _download_full_then_cut)[: 3 if full else 2]:
         try:
             got = way(video_id, start, end, out_path, hook)
         except Exception as e:  # noqa: BLE001 - lỗi mạng/yt-dlp đủ loại, thử cách sau
