@@ -3,6 +3,7 @@
 Chạy: .venv/bin/uvicorn server:app --port 8790
 """
 import hashlib
+import io
 import json
 import math
 import random
@@ -16,13 +17,14 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from PIL import Image
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from clipmaker import compose, moments
-from clipmaker import copywrite, lyrics, music, seo, stream, trends, voice, ytapi
+from clipmaker import caption, copywrite, dub, lyrics, music, mv, seo, social, stream, trends, voice, ytapi
 from clipmaker import youtube as yt
 
 ROOT = Path(__file__).resolve().parent
@@ -41,6 +43,17 @@ VARIANTS = ("", "funny", "funniest", "best moments", "compilation", "try not to 
 USED_PENALTY = 0.35             # đoạn đã đăng ở video trước: hạ điểm mạnh
 
 app = FastAPI(title="Clip Compiler")
+
+
+@app.middleware("http")
+async def _no_stale_ui(request: Request, call_next):
+    """Giao diện (html / js / css) luôn hỏi lại server (ETag, không đổi thì 304): cập nhật app xong không phải
+    xoá cache trình duyệt, tránh trang mới chạy cùng app.js cũ."""
+    resp = await call_next(request)
+    path = request.url.path
+    if path == "/" or path.endswith((".html", ".js", ".css")):
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
 JOBS, LOCK = {}, threading.Lock()
 HIST_LOCK = threading.Lock()      # nhiều luồng dựng cùng lúc cùng ghi history.json
 
@@ -1750,6 +1763,22 @@ def _tt_backgrounds(t, f, n, seg, job):
     return out
 
 
+def _lyric_window(t, audio, ls, dur, job):
+    """Đoạn [a, b] dài t["length"] giây quanh điệp khúc (đoạn được tua lại nhiều nhất); length 0: cả bài."""
+    job["stage"], job["progress"] = "Đang tìm đoạn điệp khúc", 0.25
+    anchor = ls[len(ls) // 3][0] if ls else 0.0
+    if t["length"]:
+        try:
+            peak = music.heat_peak(yt.analyze(t["audio_vid"], 0).get("heatmap"), dur)
+        except Exception:
+            peak = None
+        try:
+            anchor = music.chorus(audio, peak)[0]
+        except Exception:
+            anchor = peak or anchor
+    return lyrics.window(ls, anchor, t["length"], dur)
+
+
 def _tt_build(tid, job):
     f = _tt_dir(tid)
     t = _tt_load(tid)
@@ -1765,18 +1794,7 @@ def _tt_build(tid, job):
     dur = compose.probe(audio)["duration"] or t["audio_dur"]
     ls = lyrics.lines(lyrics.parse_lrc(t["lrc"]), dur)
     if "a" not in t:
-        job["stage"], job["progress"] = "Đang tìm đoạn điệp khúc", 0.25
-        anchor = ls[len(ls) // 3][0] if ls else 0.0
-        if t["length"]:
-            try:
-                peak = music.heat_peak(yt.analyze(t["audio_vid"], 0).get("heatmap"), dur)
-            except Exception:
-                peak = None
-            try:
-                anchor = music.chorus(audio, peak)[0]
-            except Exception:
-                anchor = peak or anchor
-        t["a"], t["b"] = lyrics.window(ls, anchor, t["length"], dur)
+        t["a"], t["b"] = _lyric_window(t, audio, ls, dur, job)
         _tt_save(t)
     a, b = t["a"], t["b"]
     tl = lyrics.timeline(ls, a, b, t.get("offset", 0.0))
@@ -1791,18 +1809,695 @@ def _tt_build(tid, job):
     if job["stop"]:
         raise InterruptedError
     head = f"{t['song']} · {t['artist']}" if t.get("artist") else t["song"]
-    cl = lyrics.cards(tl, b - a, head, work / "cards")
     tmp = f / "output.tmp.mp4"
-    lyrics.render(scenes, cl, audio, a, b, tmp, work)
+    lyrics.render(scenes, tl, head, audio, a, b, tmp, work)
     tmp.replace(f / "output.mp4")
     shutil.rmtree(work, ignore_errors=True)
     t = _tt_load(tid)
     t["stamp"] = uuid.uuid4().hex[:8]
     t["duration"] = round(b - a, 1)
     if not t.get("caption"):
-        t["caption"] = lyrics.caption(t.get("artist", ""), t["song"], tl)
+        t["caption"] = caption.for_lyrics(t.get("artist", ""), t["song"], [x[2] for x in tl])
     _tt_save(t)
     return {"duration": t["duration"]}
+
+
+# ---------- 🎶 MV lời bài hát ảnh AI ----------
+MV_FORMATS = ("h", "v", "hv")
+MV_KEY_FILE = DATA / "ai_image.json"
+
+
+def _mv_key():
+    try:
+        return json.loads(MV_KEY_FILE.read_text(encoding="utf-8")).get("key", "")
+    except (OSError, ValueError):
+        return ""
+
+
+def _mv_dir(mid):
+    f = DATA / "mv" / mid
+    if not mid.isalnum() or not (f / "mv.json").exists():
+        raise HTTPException(404, "Không tìm thấy MV này")
+    return f
+
+
+def _mv_load(mid):
+    return json.loads((_mv_dir(mid) / "mv.json").read_text(encoding="utf-8"))
+
+
+def _mv_save(t):
+    path = DATA / "mv" / t["id"] / "mv.json"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(t, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _mv_view(t):
+    f = DATA / "mv" / t["id"]
+    job = JOBS.get("mv_" + t["id"])
+    return {**{k: v for k, v in t.items() if k != "lrc"},
+            "outputs": [x for x in "hv" if (f / f"{x}.mp4").exists()],
+            "drawn": [i for i in range(len(t.get("images") or [])) if (f / f"img_{i:02d}.jpg").exists()],
+            "job": {k: v for k, v in job.items() if k != "stop"} if job else None}
+
+
+class MvReq(BaseModel):
+    song: str
+    length: int = 0
+    formats: str = "hv"
+    singer: str = "f"
+
+
+@app.get("/api/mv-key")
+def mv_key_get():
+    return {"has": bool(_mv_key())}
+
+
+class MvKey(BaseModel):
+    key: str
+
+
+@app.put("/api/mv-key")
+def mv_key_put(k: MvKey):
+    key = k.key.strip()
+    if not re.fullmatch(r"(sk|pk)_[\w-]{8,200}", key):
+        raise HTTPException(400, "Key Pollinations có dạng sk_… (lấy ở enter.pollinations.ai)")
+    MV_KEY_FILE.write_text(json.dumps({"key": key}), encoding="utf-8")
+    return {"has": True}
+
+
+@app.delete("/api/mv-key")
+def mv_key_delete():
+    MV_KEY_FILE.unlink(missing_ok=True)
+    return {"has": False}
+
+
+@app.post("/api/mv")
+def mv_create(req: MvReq):
+    song = req.song.strip()
+    if not song:
+        raise HTTPException(400, "Nhập tên bài hát (Ca sĩ - Tên bài) hoặc link YouTube của bài")
+    if req.length not in TT_LENGTHS or req.formats not in MV_FORMATS or req.singer not in mv.SINGER:
+        raise HTTPException(400, "Tuỳ chọn không hợp lệ")
+    mid = uuid.uuid4().hex[:12]
+    (DATA / "mv" / mid).mkdir(parents=True)
+    t = {"id": mid, "created": time.time(), "input": song[:200], "length": req.length, "formats": req.formats,
+         "singer": req.singer, "offset": 0.0, "title": song[:80], "warn": "", "stamp": "", "vi": {}, "img_v": {}}
+    _mv_save(t)
+    _start_job("mv_" + mid, "build", lambda job: _mv_build(mid, job))
+    return _mv_view(t)
+
+
+@app.get("/api/mv")
+def mv_list():
+    root = DATA / "mv"
+    items = []
+    for f in root.glob("*/mv.json") if root.exists() else []:
+        try:
+            items.append(_mv_view(json.loads(f.read_text(encoding="utf-8"))))
+        except (OSError, ValueError):
+            continue
+    return sorted(items, key=lambda t: -t["created"])
+
+
+class MvEdit(BaseModel):
+    vi: dict[str, str] | None = None
+    caption: str | None = None
+    offset: float | None = None
+    singer: str | None = None
+
+
+@app.put("/api/mv/{mid}")
+def mv_update(mid: str, e: MvEdit):
+    t = _mv_load(mid)
+    if e.caption is not None:
+        t["caption"] = e.caption[:2200]
+    if e.vi is not None:
+        new = {k: v.strip()[:300] for k, v in e.vi.items() if k in t.get("vi", {})}
+        if any(t["vi"].get(k) != v for k, v in new.items()):
+            t["vi"].update(new)
+            t["dirty"] = True
+    if e.offset is not None and round(e.offset, 2) != t.get("offset", 0):
+        t["offset"] = max(-10.0, min(10.0, round(e.offset, 2)))
+        t["dirty"] = True
+    if e.singer in mv.SINGER and e.singer != t["singer"]:
+        t["singer"] = e.singer           # chỉ ảnh vẽ lại sau đó mới theo ca sĩ mới
+    _mv_save(t)
+    return _mv_view(t)
+
+
+@app.post("/api/mv/{mid}/build")
+def mv_build(mid: str):
+    _mv_dir(mid)
+    _start_job("mv_" + mid, "build", lambda job: _mv_build(mid, job))
+    return _mv_view(_mv_load(mid))
+
+
+@app.post("/api/mv/{mid}/cancel")
+def mv_cancel(mid: str):
+    _mv_dir(mid)
+    return cancel("mv_" + mid)
+
+
+class MvRedraw(BaseModel):
+    prompt: str = ""
+
+
+def _mv_image_ok(t, i):
+    if not 0 <= i < len(t.get("images") or []):
+        raise HTTPException(404, "Không có ảnh này")
+
+
+@app.post("/api/mv/{mid}/images/{i}/redraw")
+def mv_redraw(mid: str, i: int, r: MvRedraw):
+    t = _mv_load(mid)
+    _mv_image_ok(t, i)
+
+    def work(job):
+        job["stage"] = f"Đang vẽ lại ảnh {i + 1}"
+        cur = _mv_load(mid)
+        im = cur["images"][i]
+        im["seed"] = random.randint(1, 10 ** 9)
+        if r.prompt.strip():
+            im["prompt"] = r.prompt.strip()[:800]
+        elif not im.get("custom"):
+            im["prompt"] = mv.prompt(im, cur["singer"], im.get("en", ""))
+        im["custom"] = bool(r.prompt.strip()) or im.get("custom", False)
+        mv.draw(im["prompt"], im["seed"], _mv_dir(mid) / f"img_{i:02d}.jpg", _mv_key(), lambda: job["stop"],
+                lambda sec: job.update(stage=f"Đang chờ lượt vẽ miễn phí (~{sec} giây)"))
+        cur = _mv_load(mid)                 # đọc lại: người dùng có thể vừa sửa lời dịch
+        cur["images"][i] = im
+        cur["img_v"][str(i)] = uuid.uuid4().hex[:6]
+        cur["dirty"] = True
+        _mv_save(cur)
+        job["progress"] = 1.0
+
+    _start_job("mv_" + mid, "draw", work)
+    return _mv_view(t)
+
+
+@app.post("/api/mv/{mid}/images/{i}")
+async def mv_upload_image(mid: str, i: int, file: UploadFile = File(...)):
+    t = _mv_load(mid)
+    _mv_image_ok(t, i)
+    job = JOBS.get("mv_" + mid)
+    if job and not job["done"]:
+        raise HTTPException(409, "MV đang dựng, chờ xong hoặc bấm Huỷ")
+    raw = await file.read()
+    try:
+        img = Image.open(io.BytesIO(raw)).convert("RGB")
+    except Exception:
+        raise HTTPException(400, "File không phải ảnh") from None
+    img.save(_mv_dir(mid) / f"img_{i:02d}.jpg", "JPEG", quality=92)
+    t["img_v"][str(i)] = uuid.uuid4().hex[:6]
+    t["images"][i]["custom"] = True
+    t["dirty"] = True
+    _mv_save(t)
+    return _mv_view(t)
+
+
+@app.get("/api/mv/{mid}/files/{name}")
+def mv_files(mid: str, name: str, download: bool = False):
+    if not re.fullmatch(r"[hv]\.mp4|thumb\.jpg|img_\d{2}\.jpg", name):
+        raise HTTPException(404)
+    path = _mv_dir(mid) / name
+    if not path.exists():
+        raise HTTPException(404)
+    if download:
+        nice = "".join(ch for ch in _mv_load(mid)["title"] if ch.isalnum() or ch in " -_").strip() or "mv"
+        tag = {"h.mp4": " 16x9", "v.mp4": " 9x16", "thumb.jpg": " thumbnail"}.get(name, "")
+        return FileResponse(path, filename=f"{nice}{tag}{path.suffix}")
+    return FileResponse(path)
+
+
+@app.delete("/api/mv/{mid}")
+def mv_delete(mid: str):
+    job = JOBS.get("mv_" + mid)
+    if job and not job["done"]:
+        raise HTTPException(409, "MV đang dựng, bấm Huỷ trước")
+    shutil.rmtree(_mv_dir(mid))
+    JOBS.pop("mv_" + mid, None)
+    return {"ok": True}
+
+
+def _mv_draw_all(t, f, job):
+    """Vẽ các ảnh còn thiếu (lần lượt: gói miễn phí chỉ cho 1 ảnh mỗi lúc)."""
+    key = _mv_key()
+    todo = [i for i in range(len(t["images"])) if not (f / f"img_{i:02d}.jpg").exists()]
+    for n, i in enumerate(todo):
+        im = t["images"][i]
+        label = f"Đang vẽ ảnh {n + 1}/{len(todo)}" + ("" if key else " (gói miễn phí ~45 giây/ảnh)")
+        job["stage"] = label
+        mv.draw(im["prompt"], im["seed"], f / f"img_{i:02d}.jpg", key, lambda: job["stop"],
+                lambda sec, label=label: job.update(stage=f"{label}: chờ lượt vẽ {sec} giây"))
+        job["progress"] = 0.15 + 0.5 * (n + 1) / len(todo)
+
+
+def _mv_build(mid, job):
+    f = _mv_dir(mid)
+    t = _mv_load(mid)
+    if not t.get("lrc"):
+        _tt_resolve(t, job)
+        _mv_save(t)
+    if job["stop"]:
+        raise InterruptedError
+    job["stage"], job["progress"] = "Đang tải bài hát", 0.08
+    cache = DATA / "music_cache"
+    cache.mkdir(exist_ok=True)
+    audio = music.download_audio(t["audio_vid"], cache / f"{t['audio_vid']}_raw.flac", trim=False)
+    dur = compose.probe(audio)["duration"] or t["audio_dur"]
+    ls = lyrics.lines(lyrics.parse_lrc(t["lrc"]), dur)
+    if "a" not in t:
+        t["a"], t["b"] = _lyric_window(t, audio, ls, dur, job)
+    a, b = t["a"], t["b"]
+    plain = lyrics.timeline(ls, a, b)                  # cảnh đổi theo câu (không theo lệch lời)
+    t["lines"] = list(dict.fromkeys(x for _, _, x in plain))
+    t["lang"] = t.get("lang") or mv.lang_of(t["lines"])
+    if t["lang"] != "vi":
+        missing = [x for x in t["lines"] if x not in t["vi"]]
+        if missing:
+            job["stage"], job["progress"] = "Đang dịch lời sang tiếng Việt", 0.12
+            t["vi"].update(zip(missing, dub.translate(missing, t["lang"])))
+    if not t.get("scenes"):
+        job["stage"] = "Đang lên cảnh cho MV"
+        scenes, images = mv.plan(plain, b - a)
+        story = [im["line"] for im in images if im["kind"] == "story" and im["line"]]
+        try:
+            en = dict(zip(story, dub.translate(story, t["lang"], "en"))) if t["lang"] != "en" else {x: x for x in story}
+        except Exception:
+            en = {}
+        for im in images:
+            im.update(en=en.get(im["line"], ""), seed=random.randint(1, 10 ** 9))
+            im["prompt"] = mv.prompt(im, t["singer"], im["en"])
+        t["scenes"], t["images"] = scenes, images
+    _mv_save(t)
+    _mv_draw_all(t, f, job)
+    if job["stop"]:
+        raise InterruptedError
+    tl = lyrics.timeline(ls, a, b, t.get("offset", 0.0))
+    imgs = [f / f"img_{i:02d}.jpg" for i in range(len(t["images"]))]
+    sub = "Vietsub" if t["lang"] != "vi" else "Lyrics"
+    work = f / "work"
+    _fresh_dir(work)
+    fmts = list(t["formats"])
+    for k, fmt in enumerate(fmts):
+        name = "bản ngang 16:9" if fmt == "h" else "bản dọc 9:16"
+        job["stage"] = f"Đang dựng {name}"
+        lo, span = 0.65 + 0.33 * k / len(fmts), 0.33 / len(fmts)
+        tmp = f / f"{fmt}.tmp.mp4"
+        mv.render(t["scenes"], imgs, tl, t["vi"] if t["lang"] != "vi" else {}, t["song"], t.get("artist", ""),
+                  audio, a, b, fmt, tmp, work, lambda: job["stop"],
+                  lambda x, lo=lo, span=span: job.update(progress=lo + span * x), sub)
+        tmp.replace(f / f"{fmt}.mp4")
+    for x in "hv":
+        if x not in fmts:
+            (f / f"{x}.mp4").unlink(missing_ok=True)
+    shutil.rmtree(work, ignore_errors=True)
+    cover = next((imgs[i] for i, im in enumerate(t["images"]) if im["kind"] == "singer"), imgs[0])
+    mv.thumbnail(cover, t["song"], t.get("artist", ""), f / "thumb.jpg", sub)
+    cur = _mv_load(mid)
+    for k in ("lrc", "lrc_dur", "audio_vid", "audio_dur", "artist", "song", "title", "warn", "a", "b", "lines",
+              "lang", "scenes", "images"):
+        if k in t:
+            cur[k] = t[k]
+    cur["vi"] = {**t["vi"], **cur.get("vi", {})}
+    cur["stamp"], cur["duration"], cur["dirty"] = uuid.uuid4().hex[:8], round(b - a, 1), False
+    cur["yt_title"], cur["yt_desc"] = mv.youtube_text(cur["song"], cur.get("artist", ""), cur["lang"], tl, cur["vi"])
+    if not cur.get("caption"):
+        cur["caption"] = _caption_text("mv", cur, "tiktok", None)
+    _mv_save(cur)
+    job["progress"] = 1.0
+    return {"duration": cur["duration"]}
+
+
+# ---------- 🎬 ghép clip kênh của mình + dịch, lồng tiếng Việt ----------
+DUB_ORIG = ("duck", "mute")
+VIDEO_EXT = (".mp4", ".mov", ".webm", ".mkv")
+
+
+def _dub_dir(did):
+    f = DATA / "dub" / did
+    if not did.isalnum() or not (f / "dub.json").exists():
+        raise HTTPException(404, "Không tìm thấy phim này")
+    return f
+
+
+def _dub_load(did):
+    return json.loads((_dub_dir(did) / "dub.json").read_text(encoding="utf-8"))
+
+
+def _dub_save(d):
+    path = DATA / "dub" / d["id"] / "dub.json"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _dub_view(d):
+    job = JOBS.get("dub_" + d["id"])
+    return {**d, "output": (DATA / "dub" / d["id"] / "output.mp4").exists(),
+            "job": {k: v for k, v in job.items() if k != "stop"} if job else None}
+
+
+def _dub_key(url):
+    m = re.search(r"/video/(\d+)|modal_id=(\d+)|/note/(\d+)", url)
+    return (m and next(g for g in m.groups() if g)) or hashlib.md5(url.encode()).hexdigest()[:12]
+
+
+class DubReq(BaseModel):
+    source: str = ""
+    owner: bool = False
+
+
+def _douyin_cookie_view():
+    f = dub.DOUYIN_COOKIES
+    return {"has": f.exists(), "updated": f.stat().st_mtime if f.exists() else None}
+
+
+@app.get("/api/dub-cookies")
+def douyin_cookies_get():
+    return _douyin_cookie_view()
+
+
+@app.post("/api/dub-cookies")
+async def douyin_cookies_upload(file: UploadFile):
+    raw = await file.read()
+    if len(raw) > 2_000_000:
+        raise HTTPException(400, "File quá lớn: chỉ cần cookie của douyin.com")
+    text = raw.decode("utf-8", "replace")
+    try:
+        dub.check_douyin_cookies(text)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    dub.DOUYIN_COOKIES.parent.mkdir(exist_ok=True)
+    dub.DOUYIN_COOKIES.write_text(text, encoding="utf-8")
+    return _douyin_cookie_view()
+
+
+@app.delete("/api/dub-cookies")
+def douyin_cookies_delete():
+    dub.DOUYIN_COOKIES.unlink(missing_ok=True)
+    return _douyin_cookie_view()
+
+
+@app.post("/api/dub")
+def dub_create(req: DubReq):
+    if not req.owner:
+        raise HTTPException(400, "Chỉ dùng cho kênh của bạn hoặc kênh đã cho phép bạn dùng: hãy tích ô xác nhận")
+    links = dub.parse_links(req.source)
+    channel = len(links) == 1 and bool(re.search(r"tiktok\.com/@[\w.-]+/?(\?|$)", links[0]) or (
+        "douyin.com/user/" in links[0] and "modal_id=" not in links[0]))
+    if req.source.strip() and not links:
+        raise HTTPException(400, "Không thấy link nào. Dán link kênh hoặc link từng video (mỗi dòng một link)")
+    if len(links) > dub.MAX_CLIPS:
+        raise HTTPException(400, f"Tối đa {dub.MAX_CLIPS} video một phim")
+    did = uuid.uuid4().hex[:12]
+    (DATA / "dub" / did).mkdir(parents=True)
+    d = {"id": did, "created": time.time(), "input": req.source.strip()[:2000], "title": "Phim ghép",
+         "clips": [] if channel else [{"key": _dub_key(u), "url": u, "title": "", "duration": 0, "ts": 0, "on": True}
+                                      for u in links],
+         "opts": {"dub": True, "subs": True, "orig": "duck", "voice": "female"}, "segs": {}, "stamp": "", "warn": ""}
+    _dub_save(d)
+    if channel:
+        _start_job("dub_" + did, "list", lambda job: _dub_list(did, links[0], job))
+    elif links:
+        _start_job("dub_" + did, "scan", lambda job: _dub_scan(did, job))
+    return _dub_view(d)
+
+
+def _dub_list(did, url, job):
+    job["stage"] = "Đang lấy danh sách video của kênh"
+    name, clips = dub.list_channel(url)
+    d = _dub_load(did)
+    d["clips"], d["title"] = clips, name or d["title"]
+    _dub_save(d)
+    return _dub_scan(did, job, 0.05)
+
+
+@app.get("/api/dub")
+def dub_list():
+    root = DATA / "dub"
+    items = []
+    for f in root.glob("*/dub.json") if root.exists() else []:
+        try:
+            items.append(_dub_view(json.loads(f.read_text(encoding="utf-8"))))
+        except (OSError, ValueError):
+            continue
+    return sorted(items, key=lambda d: -d["created"])
+
+
+@app.post("/api/dub/{did}/upload")
+def dub_upload(did: str, files: list[UploadFile] = File(...)):
+    f = _dub_dir(did)
+    d = _dub_load(did)
+    (f / "src").mkdir(exist_ok=True)
+    for up in files:
+        ext = Path(up.filename or "").suffix.lower()
+        if ext not in VIDEO_EXT:
+            raise HTTPException(400, f"{up.filename}: chỉ nhận file video {', '.join(VIDEO_EXT)}")
+        if len(d["clips"]) >= dub.MAX_CLIPS:
+            raise HTTPException(400, f"Tối đa {dub.MAX_CLIPS} video một phim")
+        key = "up" + uuid.uuid4().hex[:10]
+        with open(f / "src" / f"{key}{ext}", "wb") as out:
+            shutil.copyfileobj(up.file, out)
+        info = dub.probe(f / "src" / f"{key}{ext}")
+        if not info["duration"]:
+            (f / "src" / f"{key}{ext}").unlink()
+            raise HTTPException(400, f"{up.filename}: không đọc được video")
+        d["clips"].append({"key": key, "url": "", "title": Path(up.filename).stem[:120],
+                           "duration": round(info["duration"], 1), "ts": 0, "on": True})
+    _dub_save(d)
+    return _dub_view(d)
+
+
+class DubEdit(BaseModel):
+    title: str | None = None
+    order: list[str] | None = None          # thứ tự clip (theo key)
+    on: dict[str, bool] | None = None
+    opts: dict | None = None
+    segs: dict[str, list[str]] | None = None    # key -> bản dịch đã sửa (theo thứ tự câu)
+
+
+@app.put("/api/dub/{did}")
+def dub_update(did: str, e: DubEdit):
+    job = JOBS.get("dub_" + did)
+    if job and not job["done"]:
+        raise HTTPException(409, "Đang chạy, chờ xong hoặc bấm Huỷ")
+    d = _dub_load(did)
+    if e.title is not None:
+        d["title"] = e.title.strip()[:100] or d["title"]
+    if e.order is not None:
+        pos = {k: i for i, k in enumerate(e.order)}
+        d["clips"].sort(key=lambda c: pos.get(c["key"], len(pos)))
+    for c in d["clips"]:
+        if e.on and c["key"] in e.on:
+            c["on"] = bool(e.on[c["key"]])
+    if e.opts:
+        o = d["opts"]
+        o["dub"] = bool(e.opts.get("dub", o["dub"]))
+        o["subs"] = bool(e.opts.get("subs", o["subs"]))
+        o["orig"] = e.opts.get("orig") if e.opts.get("orig") in DUB_ORIG else o["orig"]
+        o["voice"] = e.opts.get("voice") if e.opts.get("voice") in dub.VOICES else o["voice"]
+    for key, texts in (e.segs or {}).items():
+        items = d["segs"].get(key, {}).get("items", [])
+        for g, t in zip(items, texts):
+            g["tr"] = t.strip()[:500]
+    _dub_save(d)
+    return _dub_view(d)
+
+
+@app.post("/api/dub/{did}/build")
+def dub_build(did: str):
+    d = _dub_load(did)
+    if not any(c["on"] for c in d["clips"]):
+        raise HTTPException(400, "Chưa chọn video nào")
+    _start_job("dub_" + did, "build", lambda job: _dub_build(did, job))
+    return _dub_view(d)
+
+
+@app.post("/api/dub/{did}/cancel")
+def dub_cancel(did: str):
+    _dub_dir(did)
+    return cancel("dub_" + did)
+
+
+@app.get("/api/dub/{did}/files/output.mp4")
+def dub_file(did: str, download: bool = False):
+    path = _dub_dir(did) / "output.mp4"
+    if not path.exists():
+        raise HTTPException(404)
+    if download:
+        nice = "".join(ch for ch in _dub_load(did)["title"] if ch.isalnum() or ch in " -_").strip() or "phim"
+        return FileResponse(path, filename=f"{nice} long tieng.mp4")
+    return FileResponse(path)
+
+
+@app.delete("/api/dub/{did}")
+def dub_delete(did: str):
+    job = JOBS.get("dub_" + did)
+    if job and not job["done"]:
+        raise HTTPException(409, "Đang chạy, bấm Huỷ trước")
+    shutil.rmtree(_dub_dir(did))
+    JOBS.pop("dub_" + did, None)
+    return {"ok": True}
+
+
+def _dub_src(f, key):
+    return next((p for p in (f / "src").glob(f"{key}.*") if p.suffix in VIDEO_EXT), None)
+
+
+def _dub_prepare(d, f, clips, job, lo, hi, transcribe=True):
+    """Tải + nhận giọng + dịch các clip (lưu lại, lần sau không làm lại; bản dịch đã sửa được giữ).
+    -> ([(clip, file, thông tin)], [cảnh báo]). Tiến độ quy về khoảng [lo, hi]."""
+    (f / "src").mkdir(exist_ok=True)
+    ok, warns, n = [], [], max(1, len(clips))
+    mid = lo + (hi - lo) * (0.4 if transcribe else 1.0)
+    for i, c in enumerate(clips):
+        if job["stop"]:
+            raise InterruptedError
+        job["stage"], job["progress"] = f"Đang tải video {i + 1}/{len(clips)}", lo + (mid - lo) * i / n
+        src = _dub_src(f, c["key"])
+        if not src:
+            if not c["url"]:
+                warns.append(f"Thiếu file của “{c['title']}”")
+                c["error"] = "Thiếu file"
+                continue
+            try:
+                src, info = dub.download(c["url"], f / "src", c["key"])
+            except dub.DubError as e:
+                warns.append(str(e))
+                c["error"] = str(e)[:200]
+                continue
+            if info:
+                c["title"] = c["title"] or (info.get("title") or info.get("description") or "")[:120]
+                c["ts"] = c.get("ts") or info.get("timestamp") or 0
+                if d["title"] == "Phim ghép" and info.get("uploader"):
+                    d["title"] = info["uploader"]
+        c.pop("error", None)
+        meta = dub.probe(src)
+        c["duration"] = round(meta["duration"], 1)
+        ok.append((c, src, meta))
+    _dub_save(d)
+    if not transcribe:
+        return ok, warns
+    try:
+        for i, (c, src, meta) in enumerate(ok):
+            if job["stop"]:
+                raise InterruptedError
+            if c["key"] in d["segs"]:
+                continue
+            job["progress"] = mid + (hi - mid) * i / len(ok)
+            job["stage"] = (f"Đang nghe thoại video {i + 1}/{len(ok)}"
+                            + (" (lần đầu tải model khoảng 500MB)" if dub._MODEL is None else ""))
+            lang, items = dub.transcribe(src) if meta["audio"] else ("", [])
+            job["stage"] = f"Đang dịch video {i + 1}/{len(ok)}"
+            for g, tr in zip(items, dub.translate([g["src"] for g in items], lang)):
+                g["tr"] = tr
+            d["segs"][c["key"]] = {"lang": lang, "items": items}
+            _dub_save(d)
+    finally:
+        dub.unload()
+    return ok, warns
+
+
+@app.post("/api/dub/{did}/scan")
+def dub_scan(did: str):
+    d = _dub_load(did)
+    if not d["clips"]:
+        raise HTTPException(400, "Chưa có video nào")
+    _start_job("dub_" + did, "scan", lambda job: _dub_scan(did, job))
+    return _dub_view(d)
+
+
+def _dub_scan(did, job, lo=0.0):
+    """Xem nội dung tất cả clip trước khi ghép: tải, nghe thoại, dịch, ảnh xem trước; nhận số tập, clip trùng,
+    clip không thoại; xếp theo tập (hoặc ngày đăng) và bỏ tích clip trùng / tải lỗi. Người dùng xem lại rồi mới ghép."""
+    f = _dub_dir(did)
+    d = _dub_load(did)
+    ok, warns = _dub_prepare(d, f, d["clips"], job, lo, 0.95)
+    job["stage"], job["progress"] = "Đang tạo ảnh xem trước", 0.96
+    (f / "thumb").mkdir(exist_ok=True)
+    for c, src, meta in ok:
+        if not (f / "thumb" / f"{c['key']}.jpg").exists():
+            dub.thumb(src, f / "thumb" / f"{c['key']}.jpg", min(1.0, meta["duration"] / 3))
+    got = {c["key"] for c, _, _ in ok}
+    rev, order = dub.review([c for c in d["clips"] if c["key"] in got], d["segs"])
+    pos = {k: i for i, k in enumerate(order)}
+    d["clips"].sort(key=lambda c: pos.get(c["key"], len(pos)))
+    for c in d["clips"]:
+        r = rev.get(c["key"])
+        if not r or any(x.startswith("dup:") for x in r["flags"]):
+            c["on"] = False
+    d["review"], d["scanned"] = rev, True
+    d["warn"] = " · ".join(warns[:5])
+    _dub_save(d)
+    return {"clips": len(ok)}
+
+
+@app.get("/api/dub/{did}/thumb/{key}.jpg")
+def dub_thumb(did: str, key: str):
+    path = _dub_dir(did) / "thumb" / f"{key}.jpg"
+    if not key.isalnum() or not path.exists():
+        raise HTTPException(404)
+    return FileResponse(path)
+
+
+@app.get("/api/dub/{did}/src/{key}")
+def dub_src(did: str, key: str):
+    path = _dub_src(_dub_dir(did), key) if key.isalnum() else None
+    if not path:
+        raise HTTPException(404)
+    return FileResponse(path)
+
+
+def _dub_build(did, job):
+    f = _dub_dir(did)
+    d = _dub_load(did)
+    o = d["opts"]
+    ok, warns = _dub_prepare(d, f, [c for c in d["clips"] if c["on"]], job, 0.0, 0.7, o["dub"] or o["subs"])
+    if not ok:
+        raise RuntimeError("Không tải được video nào. " + " · ".join(warns[:3]))
+
+    # chuẩn hoá cùng khung hình
+    W, H = dub.size_for([(m["w"], m["h"]) for _, _, m in ok])
+    (f / "norm").mkdir(exist_ok=True)
+    parts, timeline, at = [], [], 0.0
+    for i, (c, src, meta) in enumerate(ok):
+        if job["stop"]:
+            raise InterruptedError
+        job["stage"], job["progress"] = f"Đang chuẩn hoá video {i + 1}/{len(ok)}", 0.7 + 0.15 * i / len(ok)
+        out = f / "norm" / f"{c['key']}_{W}x{H}.mp4"
+        if not out.exists():
+            dub.normalize(src, out.with_suffix(".tmp.mp4"), W, H, meta["audio"]).replace(out)
+        length = dub.probe(out)["duration"]
+        for g in d["segs"].get(c["key"], {}).get("items", []):
+            if g["s"] < length:
+                timeline.append({"s": at + g["s"], "e": at + min(g["e"], length), "tr": g.get("tr", "")})
+        parts.append(out)
+        at += length
+    if job["stop"]:
+        raise InterruptedError
+
+    # dựng
+    job["stage"], job["progress"] = "Đang lồng tiếng và dựng phim" if o["dub"] else "Đang dựng phim", 0.86
+    work = f / "work"
+    _fresh_dir(work)
+    tmp = f / "output.tmp.mp4"
+    def report(stage, frac):
+        job["stage"], job["progress"] = stage, 0.86 + 0.1 * frac
+    total, missed = dub.render(parts, timeline, tmp, work, W, H, dub=o["dub"], subs=o["subs"], orig=o["orig"],
+                               voice=o["voice"], tts_cache=f / "tts", report=report, stop=lambda: job["stop"])
+    tmp.replace(f / "output.mp4")
+    shutil.rmtree(work, ignore_errors=True)
+    d = _dub_load(did) | {"clips": d["clips"], "segs": d["segs"], "title": d["title"]}
+    d["stamp"], d["duration"] = uuid.uuid4().hex[:8], round(total, 1)
+    if missed:
+        warns.append(f"{missed} câu không đọc được (dịch vụ giọng đọc lỗi), vẫn có phụ đề. Bấm Dựng lại để thử lại")
+    d["warn"] = " · ".join(warns[:5])
+    d["size"] = [W, H]
+    d["caption"] = _caption_text("dub", d, "tiktok", None)
+    _dub_save(d)
+    return {"duration": d["duration"]}
 
 
 # ---------- kênh YouTube: cấu hình, hàng chờ nhiều luồng, tự đăng ----------
@@ -2514,6 +3209,342 @@ def _scheduler():
         time.sleep(60)
 
 
+# ---------- 📤 đăng TikTok (hộp nháp) + Fanpage Facebook, hẹn giờ ----------
+SOCIAL_FILE = DATA / "social.json"
+SOCIAL_LOCK = threading.Lock()
+POST_LOCK = threading.Lock()          # đăng lần lượt từng video
+_SOCIAL_STATES = {}                   # state OAuth -> (nền tảng, redirect, code_verifier)
+SOCIAL_KINDS = {"dub": ("dub", "dub.json"), "tt": ("tiktok", "tt.json"), "mv": ("mv", "mv.json")}
+
+
+def _social_video(kind, f):
+    """File video để đăng: MV ưu tiên bản dọc (TikTok / Reels), không có thì bản ngang."""
+    if kind == "mv":
+        return next((f / x for x in ("v.mp4", "h.mp4") if (f / x).exists()), f / "v.mp4")
+    return f / "output.mp4"
+TARGETS = ("tiktok", "facebook")
+
+
+def _social():
+    try:
+        s = json.loads(SOCIAL_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        s = {}
+    s.setdefault("fb", {"app_id": "", "secret": "", "pages": [], "page": ""})
+    s.setdefault("tt", {"key": "", "secret": ""})
+    s.setdefault("posts", [])
+    return s
+
+
+def _social_save(s):
+    tmp = SOCIAL_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(s, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(SOCIAL_FILE)
+
+
+def _social_view(request=None):
+    s = _social()
+    fb, tt = s["fb"], s["tt"]
+    base = str(request.base_url).rstrip("/") if request else "http://localhost:8790"
+    page = next((p for p in fb["pages"] if p["id"] == fb.get("page")), None)
+    return {"fb": {"app_id": fb["app_id"], "has_secret": bool(fb["secret"]),
+                   "pages": [{"id": p["id"], "name": p["name"]} for p in fb["pages"]], "page": page and page["id"],
+                   "redirect": base + "/api/social/fb/callback"},
+            "tt": {"key": tt["key"], "has_secret": bool(tt["secret"]), "name": tt.get("name", ""),
+                   "connected": bool(tt.get("refresh")) and tt.get("rexp", 0) > time.time(),
+                   "redirect": base + "/api/social/tt/callback"},
+            "posts": sorted(s["posts"], key=lambda p: (p["at"], p["created"]))[-100:]}
+
+
+class SocialCfg(BaseModel):
+    fb_app_id: str | None = None
+    fb_secret: str | None = None
+    fb_page: str | None = None
+    tt_key: str | None = None
+    tt_secret: str | None = None
+
+
+@app.get("/api/social")
+def social_get(request: Request):
+    return _social_view(request)
+
+
+@app.put("/api/social")
+def social_set(c: SocialCfg, request: Request):
+    with SOCIAL_LOCK:
+        s = _social()
+        if c.fb_app_id is not None:
+            if c.fb_app_id.strip() != s["fb"]["app_id"]:
+                s["fb"].update(pages=[], page="")
+            s["fb"]["app_id"] = c.fb_app_id.strip()
+        if c.fb_secret:
+            s["fb"]["secret"] = c.fb_secret.strip()
+        if c.fb_page is not None:
+            if c.fb_page and not any(p["id"] == c.fb_page for p in s["fb"]["pages"]):
+                raise HTTPException(400, "Không có Trang này")
+            s["fb"]["page"] = c.fb_page
+        if c.tt_key is not None:
+            if c.tt_key.strip() != s["tt"]["key"]:
+                s["tt"] = {"key": "", "secret": s["tt"]["secret"]}
+            s["tt"]["key"] = c.tt_key.strip()
+        if c.tt_secret:
+            s["tt"]["secret"] = c.tt_secret.strip()
+        _social_save(s)
+    return _social_view(request)
+
+
+@app.get("/api/social/{net}/connect")
+def social_connect(net: str, request: Request):
+    s = _social()
+    redirect = str(request.base_url).rstrip("/") + f"/api/social/{net}/callback"
+    state = uuid.uuid4().hex
+    if net == "fb":
+        if not s["fb"]["app_id"] or not s["fb"]["secret"]:
+            raise HTTPException(400, "Nhập App ID và App secret của Facebook trước")
+        _SOCIAL_STATES[state] = (net, redirect, "")
+        return {"url": social.fb_auth_url(s["fb"]["app_id"], redirect, state)}
+    if net == "tt":
+        if not s["tt"]["key"] or not s["tt"]["secret"]:
+            raise HTTPException(400, "Nhập Client key và Client secret của TikTok trước")
+        verifier, challenge = social.tt_pkce()
+        _SOCIAL_STATES[state] = (net, redirect, verifier)
+        return {"url": social.tt_auth_url(s["tt"]["key"], redirect, state, challenge)}
+    raise HTTPException(404)
+
+
+@app.get("/api/social/{net}/callback")
+def social_callback(net: str, code: str = "", state: str = "", error: str = "", error_description: str = ""):
+    saved = _SOCIAL_STATES.pop(state, None)
+    back = "/#/settings?social="
+    if error or not saved or saved[0] != net:
+        return RedirectResponse(back + urllib.parse.quote("Lỗi: " + (error_description or error
+                                                                     or "phiên đăng nhập đã hết hạn, thử lại")))
+    _, redirect, verifier = saved
+    try:
+        with SOCIAL_LOCK:
+            s = _social()
+            if net == "fb":
+                pages = social.fb_exchange(s["fb"]["app_id"], s["fb"]["secret"], code, redirect)
+                s["fb"]["pages"] = pages
+                if not any(p["id"] == s["fb"].get("page") for p in pages):
+                    s["fb"]["page"] = pages[0]["id"]
+                msg = "Đã kết nối Facebook: " + ", ".join(p["name"] for p in pages)
+            else:
+                t = social.tt_exchange(s["tt"]["key"], s["tt"]["secret"], code, redirect, verifier)
+                try:
+                    t["name"] = social.tt_user(t["access"])
+                except social.SocialError:
+                    t["name"] = ""
+                s["tt"].update(t)
+                msg = "Đã kết nối TikTok" + (f": {t['name']}" if t["name"] else "")
+            _social_save(s)
+    except (social.SocialError, KeyError) as e:
+        return RedirectResponse(back + urllib.parse.quote(f"Lỗi: {e}"))
+    return RedirectResponse(back + urllib.parse.quote(msg))
+
+
+@app.post("/api/social/{net}/disconnect")
+def social_disconnect(net: str, request: Request):
+    with SOCIAL_LOCK:
+        s = _social()
+        if net == "fb":
+            s["fb"].update(pages=[], page="")
+        elif net == "tt":
+            s["tt"] = {"key": s["tt"]["key"], "secret": s["tt"]["secret"]}
+        else:
+            raise HTTPException(404)
+        _social_save(s)
+    return _social_view(request)
+
+
+def _social_item(kind, ref):
+    if kind not in SOCIAL_KINDS or not ref.isalnum():
+        raise HTTPException(400, "Video không hợp lệ")
+    sub, name = SOCIAL_KINDS[kind]
+    f = DATA / sub / ref
+    if not (f / name).exists():
+        raise HTTPException(404, "Không tìm thấy video")
+    return f, json.loads((f / name).read_text(encoding="utf-8"))
+
+
+def _caption_text(kind, item, net, seed):
+    """Caption + hashtag từ nội dung thật của video (xem clipmaker/caption.py)."""
+    if kind == "dub":
+        on = [c for c in item["clips"] if c["on"]]
+        segs = [item["segs"].get(c["key"], {}) for c in on]
+        lines = [g.get("tr", "") for sg in segs for g in sg.get("items", [])]
+        langs = [sg.get("lang") for sg in segs if sg.get("items")]
+        lang = max(set(langs), key=langs.count) if langs else ""
+        eps = [(item.get("review") or {}).get(c["key"], {}).get("ep") for c in on]
+        return caption.for_dub(item["title"], lines, lang, eps, net, seed)
+    if kind == "mv":
+        lang = item.get("lang", "")
+        vi = item.get("vi") or {}
+        lines = [vi.get(x) or x for x in item.get("lines", [])]
+        extra = ["#vietsub", mv.LANG_TAG[lang]] if lang in mv.LANG_TAG else []
+        return caption.for_lyrics(item.get("artist", ""), item.get("song") or item.get("title", ""), lines, net, seed,
+                                  extra)
+    lines = []
+    if item.get("lrc") and "a" in item:
+        ls = lyrics.lines(lyrics.parse_lrc(item["lrc"]), item.get("audio_dur") or item["b"] + 30)
+        lines = [x for _, x in sorted((t0, x) for t0, t1, x in ls if t1 > item["a"] and t0 < item["b"])]
+    return caption.for_lyrics(item.get("artist", ""), item.get("song") or item.get("title", ""), lines, net, seed)
+
+
+@app.get("/api/caption")
+def caption_get(kind: str, ref: str, net: str = "tiktok", seed: int | None = None):
+    _, item = _social_item(kind, ref)
+    return {"caption": _caption_text(kind, item, net if net in TARGETS else "tiktok", seed)}
+
+
+class PostReq(BaseModel):
+    kind: str
+    ref: str
+    targets: list[str]
+    caption: str = ""
+    at: float = 0          # giờ đăng (epoch giây); 0 = ngay
+
+
+@app.post("/api/social/posts")
+def social_post(r: PostReq, request: Request):
+    f, item = _social_item(r.kind, r.ref)
+    if not _social_video(r.kind, f).exists():
+        raise HTTPException(400, "Video chưa dựng xong")
+    targets = [t for t in dict.fromkeys(r.targets) if t in TARGETS]
+    if not targets:
+        raise HTTPException(400, "Chọn TikTok hoặc Facebook")
+    s = _social()
+    if "facebook" in targets and not s["fb"].get("page"):
+        raise HTTPException(400, "Chưa kết nối Fanpage Facebook (⚙ Cài đặt)")
+    if "tiktok" in targets and not s["tt"].get("refresh"):
+        raise HTTPException(400, "Chưa kết nối TikTok (⚙ Cài đặt)")
+    if r.at and r.at < time.time() - 60:
+        raise HTTPException(400, "Giờ hẹn đã qua")
+    post = {"id": uuid.uuid4().hex[:10], "created": time.time(), "at": r.at or time.time(), "kind": r.kind,
+            "ref": r.ref, "title": item.get("title", "")[:120], "caption": r.caption[:2200],
+            "status": {t: {"state": "wait", "msg": "", "link": ""} for t in targets}}
+    with SOCIAL_LOCK:
+        s = _social()
+        s["posts"].append(post)
+        _social_save(s)
+    threading.Thread(target=_social_tick, daemon=True).start()
+    return _social_view(request)
+
+
+@app.delete("/api/social/posts/{pid}")
+def social_post_delete(pid: str, request: Request):
+    with SOCIAL_LOCK:
+        s = _social()
+        p = next((p for p in s["posts"] if p["id"] == pid), None)
+        if not p:
+            raise HTTPException(404)
+        if any(v["state"] == "run" for v in p["status"].values()):
+            raise HTTPException(409, "Đang đăng, chờ xong")
+        s["posts"].remove(p)
+        _social_save(s)
+    return _social_view(request)
+
+
+@app.post("/api/social/posts/{pid}/retry")
+def social_post_retry(pid: str, request: Request):
+    with SOCIAL_LOCK:
+        s = _social()
+        p = next((p for p in s["posts"] if p["id"] == pid), None)
+        if not p:
+            raise HTTPException(404)
+        for v in p["status"].values():
+            if v["state"] == "err":
+                v.update(state="wait", msg="")
+        p["at"] = min(p["at"], time.time())
+        _social_save(s)
+    threading.Thread(target=_social_tick, daemon=True).start()
+    return _social_view(request)
+
+
+def _tt_access(s):
+    """Token TikTok hết hạn sau 24 giờ: làm mới bằng refresh token (dùng được 1 năm)."""
+    tt = s["tt"]
+    if tt.get("exp", 0) > time.time():
+        return tt["access"]
+    if tt.get("rexp", 0) < time.time():
+        raise social.SocialError("Phiên TikTok đã hết hạn: vào ⚙ Cài đặt kết nối lại")
+    tt.update(social.tt_refresh(tt["key"], tt["secret"], tt["refresh"]))
+    return tt["access"]
+
+
+def _social_set(pid, target, **kw):
+    with SOCIAL_LOCK:
+        s = _social()
+        p = next((p for p in s["posts"] if p["id"] == pid), None)
+        if p:
+            p["status"][target].update(kw)
+            _social_save(s)
+
+
+def _social_tick():
+    """Đăng các bài tới giờ (lần lượt từng bài)."""
+    if not POST_LOCK.acquire(blocking=False):
+        return
+    try:
+        while True:
+            with SOCIAL_LOCK:
+                s = _social()
+                due = next(((p, t) for p in sorted(s["posts"], key=lambda p: p["at"]) if p["at"] <= time.time()
+                            for t, v in p["status"].items() if v["state"] == "wait"), None)
+                if not due:
+                    return
+                p, target = due
+                p["status"][target]["state"] = "run"
+                _social_save(s)
+            try:
+                link, msg = _social_publish(p, target)
+                _social_set(p["id"], target, state="ok", msg=msg, link=link, done=time.time())
+            except Exception as e:      # lỗi một bài không chặn các bài sau
+                _social_set(p["id"], target, state="err", msg=str(e)[:300] or e.__class__.__name__)
+    finally:
+        POST_LOCK.release()
+
+
+def _social_publish(p, target):
+    f, item = _social_item(p["kind"], p["ref"])
+    video = _social_video(p["kind"], f)
+    if not video.exists():
+        raise social.SocialError("Không còn file video (đã xoá hoặc đang dựng lại)")
+    if target == "facebook":
+        s = _social()
+        page = next((x for x in s["fb"]["pages"] if x["id"] == s["fb"].get("page")), None)
+        if not page:
+            raise social.SocialError("Chưa chọn Fanpage")
+        meta = dub.probe(video)
+        _, link = social.fb_post(page["id"], page["token"], video, p["title"] or "Video", p["caption"],
+                                 meta["duration"], meta["h"] > meta["w"])
+        return link, f"Đã đăng lên {page['name']}"
+    with SOCIAL_LOCK:
+        s = _social()
+        access = _tt_access(s)
+        _social_save(s)
+    pid = social.tt_inbox(access, video)
+    st = social.tt_wait(access, pid)
+    return "", ("Đã vào hộp thư TikTok: mở app TikTok → Hộp thư → thông báo video, dán caption rồi bấm Đăng"
+                if st != "PROCESSING_UPLOAD" else "TikTok đang xử lý, vài phút nữa video sẽ vào hộp thư")
+
+
+def _social_loop():
+    with SOCIAL_LOCK:
+        s = _social()
+        for p in s["posts"]:
+            for v in p["status"].values():
+                if v["state"] == "run":
+                    v.update(state="err", msg="Server tắt giữa lúc đăng, bấm Thử lại")
+        _social_save(s)
+    while True:
+        try:
+            _social_tick()
+        except Exception:
+            pass
+        time.sleep(20)
+
+
 # ---------- cookie YouTube (giảm bị chặn "Sign in to confirm you're not a bot") ----------
 COOKIE_FILE = DATA / "cookies.txt"
 SETTINGS_FILE = DATA / "settings.json"
@@ -2624,6 +3655,7 @@ _apply_cookies()
 @app.on_event("startup")
 def _start_scheduler():
     threading.Thread(target=_scheduler, daemon=True).start()
+    threading.Thread(target=_social_loop, daemon=True).start()
 
 
 app.mount("/fonts", StaticFiles(directory=ROOT / "fonts"), name="fonts")

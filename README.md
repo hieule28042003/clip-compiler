@@ -141,6 +141,53 @@ App làm video dọc 1080x1920:
 - Lời lệch thì nhập số giây ở ô **Lệch lời** rồi bấm Áp dụng: app dựng lại ngay, không tải lại gì.
 - App viết sẵn caption TikTok (tên bài, một câu hát, hashtag). Tải video về rồi đăng ở TikTok Studio.
 
+## 🎶 MV lời bài hát ảnh AI (`clipmaker/mv.py`)
+
+Nhập “Ca sĩ - Tên bài” (hoặc link YouTube), chọn cả bài / 1 phút / 30 giây, khung ngang + dọc, ca sĩ nữ / nam:
+
+1. Lời có mốc thời gian + bản thu âm khớp lời: như TikTok lời bài hát.
+2. Bài nước ngoài: dịch từng câu sang tiếng Việt (Google Dịch), sửa lại cho hay ở “🇻🇳 Lời dịch” rồi Dựng lại.
+3. Lên cảnh: đổi cảnh ở đầu câu hát (5–9 giây/cảnh), xen ca sĩ hát / toàn cảnh sân khấu / khán giả / cảnh minh hoạ câu hát
+   (câu hát dịch sang tiếng Anh làm mô tả). Tối đa 24 ảnh, bài dài thì dùng lại ảnh với chuyển động khác.
+4. Vẽ ảnh bằng Pollinations: không key là gói miễn phí (khoảng 45 giây một ảnh, ảnh nhỏ, có logo pollinations.ai ở góc);
+   có API key (`sk_…`, lưu ở `data/ai_image.json`) thì dùng model Flux. Ảnh nào chưa ưng: 🎨 Vẽ lại, ✏ Tả cảnh (tự viết mô tả),
+   hoặc ⬆ thay bằng ảnh của bạn.
+5. Dựng: ảnh zoom / lia chậm, tên bài lớn ở đầu, lời gốc chạy màu theo tiếng hát (karaoke), lời Việt bên dưới, chữ
+   “Hình ảnh minh hoạ bằng AI”. Bản dọc đặt ảnh 16:9 giữa nền mờ. Kèm ảnh bìa YouTube, tiêu đề + mô tả (có lời và lời dịch),
+   caption + hashtag (#vietsub, #nhactrung…). Nút 📤 Đăng dùng bản dọc.
+
+Người trong ảnh là người do AI vẽ: đừng đặt tiêu đề như thể đó là buổi diễn có thật. Bài hát có bản quyền (Content ID).
+
+## 🎬 Ghép phim + lồng tiếng Việt (`clipmaker/dub.py`)
+
+Chỉ dùng cho **kênh của bạn hoặc kênh đã cho phép bạn dùng** (app bắt tích ô xác nhận).
+
+1. Dán link kênh TikTok (`https://www.tiktok.com/@ten_kenh`) hoặc link từng video TikTok / Douyin (mỗi dòng một link),
+   hoặc tải file video từ máy lên. TikTok hay chặn lấy cả kênh: khi đó dán link từng video. Douyin chỉ lấy được từng
+   video; video đòi đăng nhập thì tải về máy rồi tải file lên.
+2. Bỏ tích video không dùng, xếp thứ tự bằng ↑ ↓ (mặc định cũ nhất trước).
+3. Bấm “Ghép & lồng tiếng”: tải → nhận giọng nói bằng faster-whisper (model `small`, chạy trên máy, khoảng 1.3GB RAM,
+   lần đầu tải model khoảng 500MB) → dịch sang tiếng Việt (Google Dịch miễn phí, dự phòng MyMemory) → đọc bằng edge-tts
+   (giọng nữ Hoài My / nam Nam Minh), mỗi câu bắt đầu đúng lúc nhân vật nói, dài hơn chỗ trống thì đọc nhanh tối đa 1.5 lần
+   → tiếng gốc tự nhỏ lại khi có lời lồng (sidechain, vẫn giữ nhạc nền) hoặc tắt hẳn → phụ đề tiếng Việt → MP4.
+   Khung hình theo đa số clip: dọc 1080x1920 hoặc ngang 1920x1080.
+4. Sửa bản dịch từng câu trong “Sửa bản dịch” rồi Dựng lại: không phải nhận giọng lại.
+
+Hạn chế: một giọng cho cả phim (không phân biệt nhân vật), phụ đề chữ Trung có sẵn trong video gốc không bị xoá.
+
+## 📤 Đăng TikTok & Facebook (`clipmaker/social.py`)
+
+Ở ⚙ Cài đặt → “Đăng TikTok & Facebook”: nhập key của app bạn tự tạo, bấm Kết nối (một lần). Sau đó video TikTok lời bài hát,
+MV ảnh AI và phim lồng tiếng có nút **📤 Đăng**: đăng ngay hoặc hẹn giờ (máy phải đang bật lúc tới giờ). Tiến độ, lỗi, nút Thử lại ở
+“Lịch đăng”. Key, secret, token lưu ở `data/social.json` (không đưa lên git).
+
+- **Facebook Fanpage** (Graph API): app ở chế độ phát triển, trường hợp sử dụng “Quản lý mọi thứ trên Trang”, không cần Meta duyệt
+  vì chỉ đăng lên Trang của chính bạn. Video dọc ≤ 90 giây đăng thành Reels, còn lại video thường (tải lên từng phần).
+  Token Trang lấy từ token người dùng dài hạn nên không hết hạn.
+- **TikTok** (Content Posting API, upload to inbox): app loại Desktop (redirect `http://localhost:8790/api/social/tt/callback`,
+  PKCE), dùng sandbox với tài khoản của bạn là target user. Video vào hộp thư / nháp trong app TikTok, bạn dán caption rồi bấm Đăng
+  (TikTok chỉ cho app đã qua duyệt đăng công khai thẳng; giới hạn khoảng 5 video chờ trong 24 giờ). Token 24 giờ tự làm mới.
+
 ## 🔥 Xu hướng & 📊 phân tích (`clipmaker/trends.py`)
 - Chọn lĩnh vực + **7 ngày qua / 30 ngày qua**: app lấy các từ khoá người xem đang gõ, các video đăng trong khoảng đó
   nhiều view nhất (cả Shorts), rồi phân tích:
@@ -178,7 +225,8 @@ App làm video dọc 1080x1920:
 - YouTube tạm chặn máy tải quá nhiều ("Sign in to confirm you're not a bot"). Khi đó app dừng tải và báo lỗi (không ra
   video thiếu đoạn); đợi 30–60 phút rồi bấm **Dựng lại** — đoạn đã tải được giữ lại.
 - Trang **⚙ Cài đặt**: tải lên `cookies.txt` (xuất bằng tiện ích *Get cookies.txt LOCALLY*, từ cửa sổ ẩn danh đăng nhập
-  **tài khoản Google phụ**) hoặc lấy thẳng từ trình duyệt (Firefox). Bấm **Kiểm tra cookie** để thử. File lưu ở
+  **tài khoản Google phụ**) hoặc lấy thẳng từ trình duyệt (Firefox). Bấm **Kiểm tra cookie** để thử. Nếu cookie làm YouTube không trả định dạng nào
+  ("Requested format is not available"), app tự tải không cookie trong 1 giờ. File lưu ở
   `data/cookies.txt` (không đưa lên git).
 
 ## Cấu trúc
@@ -187,6 +235,10 @@ App làm video dọc 1080x1920:
 - `clipmaker/moments.py`: chấm điểm từng giây, chọn đoạn.
 - `clipmaker/compose.py`: đưa đoạn về 1920x1080/30fps, chuẩn âm lượng, số thứ tự, nguồn, chú thích, khung bình luận, nối.
 - `clipmaker/stream.py`: chấm điểm từng giây của stream (chat phát lại, độ to, Most replayed, bình luận) → đoạn hay.
+- `clipmaker/social.py`: đăng Fanpage Facebook (Reels / video) và gửi vào hộp nháp TikTok.
+- `clipmaker/mv.py`: MV lời bài hát ảnh AI (vẽ ảnh Pollinations, ảnh chuyển động, karaoke + lời Việt, bản ngang / dọc).
+- `clipmaker/caption.py`: caption + hashtag từ lời thoại / lời hát thật.
+- `clipmaker/dub.py`: lấy clip từ kênh / link, nhận giọng nói, dịch, lồng tiếng, phụ đề, ghép phim dài.
 - `clipmaker/lyrics.py`: lời có mốc thời gian (LRCLIB), chọn bản thu âm khớp lời, chọn đoạn, vẽ chữ, dựng video TikTok lời bài hát.
 - `clipmaker/music.py`: tìm bài hot, tải tiếng, nối crossfade, vẽ khung danh sách bài + sóng nhạc, dựng video ghép nhạc.
 - `server.py`, `static/`: web. Đoạn đã tải lưu ở `data/<dự án>/raw/` nên dựng lại không phải tải lại.

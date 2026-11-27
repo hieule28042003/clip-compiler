@@ -5,6 +5,7 @@ Lời của LRCLIB khớp với bản thu âm gốc, nên tiếng lấy từ vid
 (thường là "Official Audio"); MV thường có đoạn mở đầu riêng làm lời lệch.
 """
 import json
+import math
 import re
 import subprocess
 import unicodedata
@@ -12,7 +13,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from . import compose, music
 
@@ -91,7 +92,8 @@ def find(artist="", song="", query="", duration=None):
         recs = [r for r in _get("search", {"q": f"{artist} {song}"}) if r.get("syncedLyrics")]
     if not recs:
         raise NoLyrics(f"Không tìm thấy lời có mốc thời gian cho “{(artist + ' - ' + song).strip(' -') or query}”. "
-                       "Thử ghi đúng tên bài + ca sĩ, hoặc chọn bài khác.")
+                       "Thử ghi đúng tên bài + ca sĩ, hoặc chọn bài khác. Bài Trung / Hàn / Nhật: ghi tên gốc "
+                       "(vd: 欧阳耀莹 - 戒不掉); video đăng lại đặt tên tiếng Việt thường không tìm được lời.")
     best = max(recs, key=lambda r: _score(r, artist, song or query, duration))
     return {"artist": best.get("artistName") or artist, "song": best.get("trackName") or song,
             "duration": float(best.get("duration") or 0), "lrc": best["syncedLyrics"]}
@@ -150,81 +152,178 @@ def chunks(tl, total):
     return out
 
 
-# ---------- hình ----------
-def _wrap(d, text, size, max_w, max_lines):
-    toks = text.split() if " " in text.strip() else list(text)
-    sep = " " if " " in text.strip() else ""
-    while True:
-        f = music._font(text, size)
-        rows, cur = [], ""
-        for t in toks:
-            nxt = (cur + sep + t) if cur else t
-            if d.textlength(nxt, font=f) <= max_w or not cur:
-                cur = nxt
-            else:
-                rows.append(cur)
-                cur = t
-        rows.append(cur)
-        if len(rows) <= max_lines or size <= 40:
-            return rows[:max_lines], f
-        size -= 4
+# ---------- chữ: từng chữ bật ra theo tiếng hát ----------
+WORD_FONT = compose.FONTS / "BeVietnamPro-ExtraBold.ttf"
+WORD_SIZE = 62
+BAND_Y, BAND_H = 960, 600       # vùng chữ: giữa-dưới màn (tránh tên bài phía trên, caption + nút bên phải của TikTok)
+TEXT_W = 820
+POP = 0.2                        # s: chữ mới phóng to rồi thu về trong ngần này
+POP_SCALE = 0.22
+FADE = 0.15                      # s: hết một trang chữ thì mờ đi
+NOW = (255, 214, 64)             # chữ đang hát: vàng; chữ đã hát: trắng
+_WF = {}
 
 
-def card(cur, nxt, head, out):
-    """Khung chữ 1080x1920 trong suốt: tên bài phía trên, câu đang hát to giữa màn, câu sau nhỏ mờ bên dưới."""
-    img = Image.new("RGBA", (TW, TH), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    # tên bài: viên thuốc mờ phía trên (chừa chỗ cho thanh trên cùng của TikTok)
-    text, f = music._fit(d, "♪ " + head, 40, TW - 200, "SemiBold")
-    w = d.textlength(text, font=f)
-    x0, y0 = (TW - w) / 2 - 30, 250
-    d.rounded_rectangle((x0, y0, x0 + w + 60, y0 + 76), 38, fill=(0, 0, 0, 120))
-    d.text((TW / 2, y0 + 38), text, font=f, fill=(255, 255, 255, 235), anchor="mm")
-    glow = Image.new("RGBA", (TW, TH), (0, 0, 0, 0))
-    g = ImageDraw.Draw(glow)
-    if cur:
-        rows, f = _wrap(d, cur, 96, TW - 140, 3)
-        lh = f.size * 1.22
-        y = TH * 0.52 - lh * len(rows) / 2
-        for r in rows:
-            g.text((TW / 2, y + lh / 2), r, font=f, fill=(0, 0, 0, 200), anchor="mm", stroke_width=14,
-                   stroke_fill=(0, 0, 0, 200))
-            d.text((TW / 2, y + lh / 2), r, font=f, fill=(255, 255, 255, 255), anchor="mm", stroke_width=5,
-                   stroke_fill=(0, 0, 0, 230))
-            y += lh
-        if nxt:
-            rows2, f2 = _wrap(d, nxt, 54, TW - 200, 2)
-            y += 36
-            for r in rows2:
-                d.text((TW / 2, y + f2.size * 0.6), r, font=f2, fill=(255, 255, 255, 150), anchor="mm",
-                       stroke_width=3, stroke_fill=(0, 0, 0, 150))
-                y += f2.size * 1.2
-    else:                                            # nhạc dạo
-        d.text((TW / 2, TH * 0.52), "♪  ♪  ♪", font=music._font("♪", 90), fill=(255, 255, 255, 210), anchor="mm",
-               stroke_width=4, stroke_fill=(0, 0, 0, 200))
-    out_img = Image.alpha_composite(glow.filter(ImageFilter.GaussianBlur(18)), img)
-    out_img.save(out)
+def _wfont(text, size):
+    if music.CJK.search(text) or music.THAI.search(text):
+        return music._font(text, size)
+    if size not in _WF:
+        _WF[size] = ImageFont.truetype(str(WORD_FONT), size)
+    return _WF[size]
+
+
+def _tokens(text):
+    """Từ (có dấu cách) hoặc từng chữ (Trung / Nhật / Thái viết liền)."""
+    return (text.split(), " ") if " " in text.strip() else (list(text.strip()), "")
+
+
+def word_times(t0, t1, toks):
+    """LRCLIB chỉ có mốc từng câu: rải các từ trong lúc hát câu (từ dài hát lâu hơn chút), chừa khoảng ngân cuối câu."""
+    sing = min((t1 - t0) * 0.85, 0.42 * len(toks) + 0.3)
+    w = [1 + 0.06 * len(x) for x in toks]
+    out, acc = [], 0.0
+    for x in w:
+        out.append(t0 + sing * acc / sum(w))
+        acc += x
     return out
 
 
-def cards(tl, total, head, work):
-    """Ảnh chữ phủ kín [0, total] (khoảng trống giữa các câu = ảnh ♪) -> [(ảnh, độ dài)]."""
-    work = Path(work)
-    work.mkdir(parents=True, exist_ok=True)
-    spans, t = [], 0.0
-    for i, (t0, t1, text) in enumerate(tl):
-        if t0 - t > 0.4:
-            spans.append((t, t0, "", text))
-        elif spans and t0 > t:                       # khe nhỏ: kéo câu trước tới câu này
-            spans[-1] = (spans[-1][0], t0, *spans[-1][2:])
-        spans.append((max(t, t0), t1, text, tl[i + 1][2] if i + 1 < len(tl) else ""))
-        t = t1
-    if total - t > 0.05:
-        spans.append((t, total, "", ""))
+def _sprite(text, f, color):
+    """Một từ: chữ đậm + bóng mềm phía dưới (dễ đọc trên mọi nền, không viền đen cứng)."""
+    l, _, r, _ = f.getbbox(text)
+    asc, desc = f.getmetrics()
+    pad = 24                                         # cao bằng nhau cho mọi từ: các từ cùng một đường chân chữ
+    img = Image.new("RGBA", (r - l + 2 * pad, asc + desc + 2 * pad), (0, 0, 0, 0))
+    sh = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    ImageDraw.Draw(sh).text((pad - l, pad + 5), text, font=f, fill=(0, 0, 0, 190), stroke_width=4,
+                            stroke_fill=(0, 0, 0, 190))
+    img = Image.alpha_composite(img, sh.filter(ImageFilter.GaussianBlur(7)))
+    ImageDraw.Draw(img).text((pad - l, pad), text, font=f, fill=(*color, 255), stroke_width=2,
+                             stroke_fill=(0, 0, 0, 90))
+    return img, pad
+
+
+def _rows(ws, gap, soft=()):
+    """Chia một nhóm từ (độ rộng ws) thành 1 hoặc 2 dòng dài gần bằng nhau, ưu tiên ngắt sau dấu phẩy
+    (soft: vị trí ngắt đẹp) -> [(đầu, cuối)]."""
+    width = lambda i, j: sum(ws[i:j]) + gap * (j - i - 1)
+    n = len(ws)
+    if width(0, n) <= TEXT_W or n < 2:
+        return [(0, n)]
+    fits = [k for k in range(1, n) if max(width(0, k), width(k, n)) <= TEXT_W]
+    if fits:
+        k = min(fits, key=lambda k: max(width(0, k), width(k, n)) - (TEXT_W * 0.25 if k in soft else 0))
+        return [(0, k), (k, n)]
+    out, i = [], 0                                    # từ quá dài: xếp lần lượt
+    for j in range(1, n + 1):
+        if j == n or width(i, j + 1) > TEXT_W:
+            out.append((i, j))
+            i = j
+    return out
+
+
+def _split(ws, gap, n, soft=()):
+    """Chia các từ thành n nhóm liền nhau, độ dài gần bằng nhau (lệch 1 từ để ngắt ở dấu phẩy) -> [(đầu, cuối)]."""
+    out, i = [], 0
+    for g in range(n, 0, -1):
+        rest = sum(ws[i:]) + gap * (len(ws) - i - 1)
+        j, w = i, 0.0
+        while j < len(ws) - (g - 1) and (j == i or w + gap + ws[j] / 2 <= rest / g):
+            w += ws[j] + (gap if j > i else 0)
+            j += 1
+        if g > 1 and j not in soft:
+            j = next((x for x in (j - 1, j + 1) if x in soft and i < x <= len(ws) - (g - 1)), j)
+        out.append((i, j if g > 1 else len(ws)))
+        i = out[-1][1]
+    return out
+
+
+def _groups(ws, gap, soft=()):
+    """Câu dài -> ít trang nhất mà mỗi trang vừa 2 dòng, các trang dài gần bằng nhau
+    (không để trang cuối chỉ còn vài từ)."""
+    total = sum(ws) + gap * (len(ws) - 1)
+    for n in range(max(1, math.ceil(total / (TEXT_W * 2))), len(ws) + 1):
+        for gs in (_split(ws, gap, n, soft), _split(ws, gap, n)):
+            if all(len(_rows(ws[i:j], gap, {k - i for k in soft})) <= 2 for i, j in gs):
+                return gs
+    return [(i, i + 1) for i in range(len(ws))]
+
+
+def pages(tl):
+    """Câu -> các trang chữ (tối đa 2 dòng) -> [{t0, t1, words: [(t, ảnh trắng, ảnh vàng, x, y, pad)]}]."""
+    d = ImageDraw.Draw(Image.new("RGBA", (8, 8)))
     out = []
-    for k, (x, y, cur, nxt) in enumerate(spans):
-        if y - x > 0.02:
-            out.append((card(cur, nxt, head, work / f"card_{k:03d}.png"), y - x))
+    for t0, t1, text in tl:
+        toks, sep = _tokens(text)
+        if not toks:
+            continue
+        times = word_times(t0, t1, toks)
+        f = _wfont(text, WORD_SIZE)
+        gap = d.textlength(" ", font=f) if sep else 2
+        lh = int(f.size * 1.3)
+        ws = [d.textlength(x, font=f) for x in toks]
+        soft = {k + 1 for k, x in enumerate(toks[:-1]) if x[-1] in ",.;:!?…，、。"}     # ngắt đẹp: sau dấu câu
+        cur = []
+        for gi, gj in _groups(ws, gap, soft):
+            rows = [(gi + i, gi + j) for i, j in _rows(ws[gi:gj], gap, {k - gi for k in soft})]
+            words, top = [], (BAND_H - lh * len(rows)) / 2
+            for k, (i, j) in enumerate(rows):
+                x = (TW - (sum(ws[i:j]) + gap * (j - i - 1))) / 2
+                for m in range(i, j):
+                    white, pad = _sprite(toks[m], f, (255, 255, 255))
+                    words.append((times[m], white, _sprite(toks[m], f, NOW)[0], x, top + k * lh, pad))
+                    x += ws[m] + gap
+            cur.append({"t0": words[0][0], "words": words})
+        for k, p in enumerate(cur):
+            p["t1"] = cur[k + 1]["t0"] if k + 1 < len(cur) else t1
+        out += cur
+    return out
+
+
+def _ease(x):
+    return 1 - (1 - x) ** 3
+
+
+def still(pg, t):
+    """Số chữ đang hiện nếu khung lúc t đứng yên (không chữ nào đang bật, không mờ dần), ngược lại None:
+    hai khung đứng yên cùng số chữ thì giống hệt nhau, khỏi vẽ lại."""
+    shown = sum(w[0] <= t for w in pg["words"])
+    moving = any(0 <= t - w[0] < POP for w in pg["words"])
+    return None if moving or pg["t1"] - t < FADE else shown
+
+
+def band(pg, t):
+    """Ảnh RGBA vùng chữ lúc t (trong trang pg)."""
+    shown = [w for w in pg["words"] if w[0] <= t]
+    fade = max(0.0, min(1.0, (pg["t1"] - t) / FADE))
+    img = Image.new("RGBA", (TW, BAND_H), (0, 0, 0, 0))
+    for k, (wt, white, now, x, y, pad) in enumerate(shown):
+        spr = now if k == len(shown) - 1 else white
+        age = t - wt
+        if age < POP:
+            s = 1 + POP_SCALE * (1 - _ease(age / POP))
+            big = spr.resize((int(spr.width * s), int(spr.height * s)), Image.BILINEAR)
+            if age < 0.06:
+                big.putalpha(big.getchannel("A").point(lambda v, a=age / 0.06: int(v * a)))
+            cx, cy = x - pad + spr.width / 2, y - pad + spr.height / 2
+            img.alpha_composite(big, (int(cx - big.width / 2), int(cy - big.height / 2)))
+        else:
+            img.alpha_composite(spr, (int(x - pad), int(y - pad)))
+    if fade < 1:
+        img.putalpha(img.getchannel("A").point(lambda v: int(v * fade)))
+    return img
+
+
+def head_png(head, out):
+    """Tên bài: viên thuốc mờ phía trên (chừa thanh trên cùng của TikTok)."""
+    img = Image.new("RGBA", (TW, TH), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    text, f = music._fit(d, "♪ " + head, 36, TW - 240, "SemiBold")
+    w = d.textlength(text, font=f)
+    x0, y0 = (TW - w) / 2 - 28, 250
+    d.rounded_rectangle((x0, y0, x0 + w + 56, y0 + 68), 34, fill=(0, 0, 0, 110))
+    d.text((TW / 2, y0 + 34), text, font=f, fill=(255, 255, 255, 230), anchor="mm")
+    img.save(out)
     return out
 
 
@@ -251,25 +350,53 @@ def scene(src, out, dur):
     return out
 
 
-def render(scenes, card_list, audio, a, b, out, work):
-    """Ghép cảnh nền + lớp chữ + tiếng bài hát đoạn [a, b] (fade đầu / cuối) -> MP4 1080x1920."""
+def render(scenes, tl, head, audio, a, b, out, work):
+    """Ghép cảnh nền + tên bài + chữ bật từng từ (vẽ từng khung, đưa thẳng vào ffmpeg) + tiếng bài hát đoạn [a, b]
+    (fade đầu / cuối) -> MP4 1080x1920."""
     work = Path(work)
     total = b - a
     lst = work / "scenes.txt"
     lst.write_text("".join(f"file '{Path(s).resolve().as_posix()}'\n" for s in scenes), encoding="utf-8")
     bg = work / "bg.mp4"
     compose.run(["-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(bg)])
-    ov = work / "cards.txt"
-    body = "".join(f"file '{Path(p).resolve().as_posix()}'\nduration {d:.3f}\n" for p, d in card_list)
-    ov.write_text("ffconcat version 1.0\n" + body + f"file '{Path(card_list[-1][0]).resolve().as_posix()}'\n",
-                  encoding="utf-8")
+    hp = head_png(head, work / "head.png")
     fade = min(1.5, total / 6)
-    compose.run(["-i", str(bg), "-f", "concat", "-safe", "0", "-i", str(ov), "-ss", f"{a:.3f}", "-t", f"{total:.3f}",
-                 "-i", str(audio), "-filter_complex",
-                 f"[1:v]fps={FPS},format=rgba[c];[0:v][c]overlay=0:0:eof_action=repeat,format=yuv420p[v];"
-                 f"[2:a]afade=t=in:d=0.25,afade=t=out:st={total - fade:.3f}:d={fade:.3f}[a]",
-                 "-map", "[v]", "-map", "[a]", "-t", f"{total:.3f}", *compose.VCODEC, *compose.ACODEC,
-                 "-movflags", "+faststart", str(out)])
+    log = open(work / "ffmpeg.log", "w+", encoding="utf-8", errors="replace")
+    proc = subprocess.Popen(
+        [compose.FFMPEG, "-hide_banner", "-v", "error", "-y", "-i", str(bg),
+         "-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{TW}x{BAND_H}", "-r", str(FPS), "-i", "-",
+         "-loop", "1", "-i", str(hp), "-ss", f"{a:.3f}", "-t", f"{total:.3f}", "-i", str(audio), "-filter_complex",
+         f"[0:v][2:v]overlay=0:0[h];[h][1:v]overlay=0:{BAND_Y}:eof_action=pass,format=yuv420p[v];"
+         f"[3:a]afade=t=in:d=0.25,afade=t=out:st={total - fade:.3f}:d={fade:.3f}[a]",
+         "-map", "[v]", "-map", "[a]", "-t", f"{total:.3f}", *compose.VCODEC, *compose.ACODEC,
+         "-movflags", "+faststart", str(out)], stdin=subprocess.PIPE, stderr=log)
+    pg_list = pages(tl)
+    empty = bytes(TW * BAND_H * 4)
+    last_key, last = None, empty
+    try:
+        k = 0
+        for i in range(int(total * FPS + 0.999)):
+            t = i / FPS
+            while k < len(pg_list) and t >= pg_list[k]["t1"]:
+                k += 1
+            if k < len(pg_list) and t >= pg_list[k]["t0"]:
+                n = still(pg_list[k], t)
+                key = None if n is None else (k, n)
+                if key is None or key != last_key:
+                    last = band(pg_list[k], t).tobytes()
+                last_key = key
+                frame = last
+            else:
+                frame, last_key = empty, None
+            proc.stdin.write(frame)
+        proc.stdin.close()
+    except BrokenPipeError:
+        pass
+    code = proc.wait()
+    log.seek(0)
+    if code:
+        raise RuntimeError("ffmpeg: " + log.read().strip()[-400:])
+    log.close()
     return out
 
 

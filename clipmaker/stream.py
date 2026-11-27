@@ -49,7 +49,7 @@ def video_id(url):
 def fetch_chat(vid, work):
     """Tải chat phát lại -> [(giây, chữ, trọng số)]; stream tắt chat phát lại thì []."""
     out = Path(work) / f"chat_{vid}"
-    opts = {**yt._base_opts(), "skip_download": True, "writesubtitles": True, "subtitleslangs": ["live_chat"],
+    opts = {**yt._base_opts(), "skip_download": True, "ignore_no_formats_error": True, "writesubtitles": True, "subtitleslangs": ["live_chat"],
             "outtmpl": str(out), "noprogress": True}
     with yt_dlp.YoutubeDL(opts) as y:
         y.download([f"https://www.youtube.com/watch?v={vid}"])

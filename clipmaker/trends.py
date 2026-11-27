@@ -165,7 +165,7 @@ def _med(xs):
 
 def _details(vid):
     """Ngày giờ đăng, like, bình luận, số sub kênh của một video (không tải video)."""
-    with yt_dlp.YoutubeDL({**yt._base_opts(), "skip_download": True}) as y:
+    with yt_dlp.YoutubeDL({**yt._base_opts(), "skip_download": True, "ignore_no_formats_error": True}) as y:
         info = y.extract_info(f"https://www.youtube.com/watch?v={vid}", download=False)
     return {"ts": info.get("timestamp") or info.get("release_timestamp"), "date": info.get("upload_date"),
             "likes": info.get("like_count") or 0, "comments": info.get("comment_count") or 0,

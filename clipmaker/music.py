@@ -203,7 +203,7 @@ def match(artist, song, version="original"):
     main = _main_artist(artist)
     vq, vmark = VERSIONS[version][1], VERSIONS[version][2]
     try:
-        with yt_dlp.YoutubeDL({**yt._base_opts(), "extract_flat": True, "skip_download": True}) as y:
+        with yt_dlp.YoutubeDL({**yt._base_opts(), "extract_flat": True, "skip_download": True, "ignore_no_formats_error": True}) as y:
             res = y.extract_info(f"ytsearch8:{song} {main} {vq}".strip(), download=False)
     except Exception:  # noqa: BLE001
         return None
@@ -339,7 +339,7 @@ def info(url_or_id):
     m = re.search(r"(?:v=|youtu\.be/|shorts/|^)([\w-]{11})(?:\b|$)", url_or_id.strip())
     if not m:
         raise ValueError("Link YouTube không hợp lệ")
-    with yt_dlp.YoutubeDL({**yt._base_opts(), "skip_download": True}) as y:
+    with yt_dlp.YoutubeDL({**yt._base_opts(), "skip_download": True, "ignore_no_formats_error": True}) as y:
         e = y.extract_info(f"https://www.youtube.com/watch?v={m[1]}", download=False)
     v = {"id": e["id"], "title": e.get("title") or e["id"], "channel": e.get("channel") or e.get("uploader") or "",
          "views": e.get("view_count") or 0, "duration": e.get("duration") or 0}
@@ -357,15 +357,18 @@ def download_audio(vid, out, trim=True):
     tmp_dir = out.parent / f"tmp_{out.stem}"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     try:
-        opts = {**yt._base_opts(), "format": "bestaudio/best", "noplaylist": True, "noprogress": True,
-                "outtmpl": str(tmp_dir / "src.%(ext)s")}
-        try:
-            with yt_dlp.YoutubeDL(opts) as y:
-                y.download([f"https://www.youtube.com/watch?v={vid}"])
-        except yt_dlp.utils.DownloadError as e:
-            if yt._blocked(str(e)):
-                raise yt.Blocked(str(e)) from e
-            raise
+        for retry in (True, False):
+            opts = {**yt._base_opts(), "format": "bestaudio/best", "noplaylist": True, "noprogress": True,
+                    "outtmpl": str(tmp_dir / "src.%(ext)s")}
+            try:
+                with yt_dlp.YoutubeDL(opts) as y:
+                    y.download([f"https://www.youtube.com/watch?v={vid}"])
+                break
+            except yt_dlp.utils.DownloadError as e:
+                if yt._blocked(str(e)):
+                    raise yt.Blocked(str(e)) from e
+                if not (retry and yt.no_formats(str(e)) and yt.drop_cookies()):
+                    raise
         src = next(tmp_dir.glob("src.*"))
         sil = "silenceremove=start_periods=1:start_threshold=-50dB:start_silence=0.1"
         part = out.with_suffix(".part.flac")

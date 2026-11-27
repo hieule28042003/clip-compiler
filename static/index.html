@@ -16,6 +16,8 @@
     <a href="#/shorts" data-nav="shorts"><i>✂</i><span>Làm Shorts</span></a>
     <a href="#/music" data-nav="music"><i>🎵</i><span>Ghép nhạc</span></a>
     <a href="#/tiktok" data-nav="tiktok"><i>🎤</i><span>TikTok lời bài hát</span></a>
+    <a href="#/mv" data-nav="mv"><i>🎶</i><span>MV ảnh AI</span></a>
+    <a href="#/dub" data-nav="dub"><i>🎬</i><span>Ghép phim lồng tiếng</span></a>
     <a href="#/trends" data-nav="trends"><i>🔥</i><span>Xu hướng</span></a>
     <a href="#/projects" data-nav="projects"><i>📁</i><span>Dự án</span></a>
     <a href="#/channels" data-nav="channels"><i>📺</i><span>Kênh YouTube</span></a>
@@ -225,7 +227,57 @@
 </main>
 
 <main id="settings" class="page hidden">
-  <section class="card">
+  <section class="card" id="social">
+    <div class="listHead"><h2>📤 Đăng TikTok & Facebook</h2><span class="hint" id="soMsg"></span></div>
+    <p class="hint">Kết nối một lần, sau đó mỗi video có nút <b>📤 Đăng</b> (đăng ngay hoặc hẹn giờ; máy phải đang bật lúc tới giờ).
+      <b>Facebook</b>: đăng lên Fanpage của bạn (video dọc ≤ 90 giây thành Reels, còn lại là video thường).
+      <b>TikTok</b>: video vào <b>hộp thư / nháp</b> trong app TikTok của bạn, bạn mở ra dán caption rồi bấm Đăng
+      (TikTok chỉ cho app đã qua duyệt đăng công khai thẳng). Key, secret, token chỉ lưu trên máy bạn (<code>data/social.json</code>),
+      không dán vào chat.</p>
+    <div class="soGrid">
+      <div class="soBox">
+        <h3>Facebook Fanpage <span class="hint" id="fbState"></span></h3>
+        <details><summary class="hint">Cách lấy App ID / App secret (khoảng 10 phút, một lần)</summary>
+          <ol class="hint">
+            <li>Vào <a href="https://developers.facebook.com/apps" target="_blank" rel="noopener">developers.facebook.com/apps</a> bằng tài khoản quản trị Fanpage → <b>Tạo ứng dụng</b>.</li>
+            <li>Trường hợp sử dụng: chọn <b>Quản lý mọi thứ trên Trang của bạn</b> (Manage everything on your Page). Không cần gửi duyệt: app để chế độ phát triển, dùng được cho Trang của chính bạn.</li>
+            <li>Vào <b>Trường hợp sử dụng</b> (Use cases) → <b>Tuỳ chỉnh</b> ở “Quản lý mọi thứ trên Trang” → <b>Quyền</b>: bấm <b>Thêm</b> cho
+              <code>pages_show_list</code>, <code>pages_read_engagement</code>, <code>pages_manage_posts</code>. Thiếu bước này Facebook báo
+              “Invalid Scopes: pages_manage_posts”. App tạo theo trường hợp sử dụng khác (vd chỉ “Xác thực bằng Đăng nhập Facebook”)
+              không thêm được các quyền này: tạo app mới đúng trường hợp “Quản lý mọi thứ trên Trang”.</li>
+            <li><b>Cài đặt ứng dụng → Thông tin cơ bản</b>:
+              ô <b>Miền ứng dụng</b> (App domains) nhập <code>localhost</code>; kéo xuống cuối bấm <b>+ Thêm nền tảng</b> → <b>Trang web</b>,
+              ô URL trang web nhập <code id="fbSite"></code> → <b>Lưu thay đổi</b>.</li>
+            <li>Thêm sản phẩm <b>Đăng nhập bằng Facebook</b> (nếu chưa có) → <b>Cài đặt</b>: bật <b>Đăng nhập OAuth ứng dụng</b> và
+              <b>Đăng nhập OAuth trên web</b>, ô <b>URI chuyển hướng OAuth hợp lệ</b> dán <code id="fbRedirect"></code> → Lưu.</li>
+            <li>Vẫn ở Thông tin cơ bản: chép <b>ID ứng dụng</b> và <b>Khoá bí mật</b> vào 2 ô dưới, bấm Lưu rồi Kết nối. Khi Facebook hỏi, tích chọn Fanpage của bạn.</li>
+            <li>Luôn mở app bằng đúng địa chỉ đã khai báo (<code>localhost:8790</code>, không dùng <code>127.0.0.1</code>), nếu không Facebook báo “Miền của URL này không được đưa vào miền của ứng dụng”.</li>
+          </ol></details>
+        <input id="fbApp" placeholder="App ID">
+        <input id="fbSecret" type="password" placeholder="App secret" autocomplete="off">
+        <div class="row"><button class="mini" id="fbSave">Lưu</button><button class="primary" id="fbConnect">🔗 Kết nối Facebook</button>
+          <button class="mini danger hidden" id="fbOff">Ngắt</button></div>
+        <label class="lbl hidden" id="fbPageBox">Đăng lên Trang <select id="fbPage"></select></label>
+      </div>
+      <div class="soBox">
+        <h3>TikTok <span class="hint" id="ttState"></span></h3>
+        <details><summary class="hint">Cách lấy Client key / Client secret (khoảng 10 phút, một lần)</summary>
+          <ol class="hint">
+            <li>Vào <a href="https://developers.tiktok.com/apps" target="_blank" rel="noopener">developers.tiktok.com</a> → Manage apps → <b>Connect an app</b>. Phần Platforms chọn <b>Desktop</b>.</li>
+            <li>Add products: <b>Login Kit</b> và <b>Content Posting API</b>. Scopes: <code>user.info.basic</code>, <code>video.upload</code>.</li>
+            <li>Login Kit → Redirect URI (Desktop): dán <code id="ttRedirect"></code></li>
+            <li>Chuyển sang tab <b>Sandbox</b> → tạo sandbox → <b>Target users</b>: thêm tài khoản TikTok của bạn. Chép <b>Client key</b> và <b>Client secret</b> của sandbox vào 2 ô dưới, bấm Lưu rồi Kết nối.</li>
+          </ol></details>
+        <input id="ttKey" placeholder="Client key">
+        <input id="ttSecret" type="password" placeholder="Client secret" autocomplete="off">
+        <div class="row"><button class="mini" id="ttSave">Lưu</button><button class="primary" id="ttConnect">🔗 Kết nối TikTok</button>
+          <button class="mini danger hidden" id="ttOff">Ngắt</button></div>
+      </div>
+    </div>
+    <h3 class="mt">Lịch đăng</h3>
+    <div id="soPosts" class="soPosts"><p class="hint">Chưa có bài nào.</p></div>
+  </section>
+  <section class="card mt">
     <div class="listHead"><h2>🍪 Cookie YouTube</h2><span class="hint" id="ckState"></span></div>
     <p class="hint">Tải nhiều video, YouTube dễ tạm chặn máy bạn (“Sign in to confirm you're not a bot”) và video ra bị thiếu đoạn.
       Dùng cookie của một tài khoản YouTube đã đăng nhập thì ít bị chặn hơn nhiều.</p>
@@ -338,6 +390,80 @@
   <section class="card narrow mt">
     <h2>Video đã làm</h2>
     <div id="tList" class="ttList"><p class="hint">Chưa có video nào.</p></div>
+  </section>
+</main>
+
+<main id="mvPage" class="page hidden">
+  <section class="card narrow">
+    <h2>🎶 MV lời bài hát ảnh AI</h2>
+    <p class="hint">Nhập tên bài, app tìm lời có mốc thời gian và bản thu âm khớp lời, <b>dịch lời sang tiếng Việt</b>
+      (bài nước ngoài), rồi nhờ AI <b>vẽ ảnh</b>: ca sĩ trên sân khấu, khán giả, cảnh minh hoạ theo từng câu hát.
+      Ảnh chuyển động nhẹ, đổi cảnh đúng lúc sang câu mới, lời gốc chạy màu theo tiếng hát, lời Việt bên dưới.
+      Ra bản <b>ngang 16:9</b> cho YouTube và bản <b>dọc 9:16</b> cho TikTok / Reels, kèm ảnh bìa, tiêu đề, mô tả và caption.</p>
+    <label class="lbl">Bài hát</label>
+    <input id="mSong" placeholder="Ca sĩ - Tên bài, bài Trung ghi tên tiếng Trung (vd: 欧阳耀莹 - 戒不掉), hoặc link YouTube">
+    <div class="three">
+      <div><span class="hint">Độ dài</span>
+        <select id="mLen"><option value="0" selected>Cả bài</option><option value="60">1 phút (điệp khúc)</option>
+          <option value="30">30 giây (điệp khúc)</option></select></div>
+      <div><span class="hint">Khung hình</span>
+        <select id="mFmt"><option value="hv" selected>Ngang + dọc</option><option value="h">Ngang 16:9 (YouTube)</option>
+          <option value="v">Dọc 9:16 (TikTok)</option></select></div>
+      <div><span class="hint">Ca sĩ trong ảnh</span>
+        <select id="mSinger"><option value="f">Nữ</option><option value="m">Nam</option></select></div>
+    </div>
+    <div class="row mt"><button id="mMake" class="primary big">🎨 Làm MV</button></div>
+    <p class="err" id="mErr"></p>
+    <details class="mt" id="mKeyBox"><summary>🔑 Vẽ ảnh đẹp hơn với API key Pollinations <span id="mKeyState" class="hint"></span></summary>
+      <p class="hint">Không có key, app dùng gói miễn phí: khoảng <b>45 giây một ảnh</b>, ảnh nhỏ và có logo
+        “pollinations.ai” ở góc (một MV cả bài cần khoảng 20 ảnh, mất 15–20 phút). Có key thì vẽ bằng model Flux, ảnh to, không logo, nhanh hơn.
+        Lấy key ở <a href="https://enter.pollinations.ai" target="_blank" rel="noopener">enter.pollinations.ai</a> → API Keys
+        (xem giá và lượt miễn phí trên trang đó). Key chỉ lưu trên máy này.</p>
+      <div class="row"><input id="mKey" type="password" placeholder="sk_..." autocomplete="off">
+        <button id="mKeySave" class="mini">Lưu key</button><button id="mKeyDel" class="mini danger">Xoá key</button></div>
+    </details>
+    <div class="warn">⚠ Người trong ảnh (ca sĩ, khán giả) là <b>người do AI vẽ</b>; video luôn ghi “Hình ảnh minh hoạ bằng AI”.
+      Đừng đặt tiêu đề như thể đó là buổi diễn có thật. Bài hát có bản quyền: YouTube / TikTok có thể nhận diện bài
+      (Content ID) và chuyển tiền quảng cáo cho chủ bài hoặc tắt tiếng.</div>
+  </section>
+  <section class="card narrow mt">
+    <h2>MV đã làm</h2>
+    <div id="mList" class="mvList"><p class="hint">Chưa có MV nào.</p></div>
+  </section>
+</main>
+
+<main id="dubPage" class="page hidden">
+  <section class="card narrow">
+    <h2>🎬 Ghép phim + lồng tiếng Việt</h2>
+    <p class="hint">Dán link <b>kênh TikTok của bạn</b> (vd https://www.tiktok.com/@ten_kenh) hoặc link từng video TikTok / Douyin
+      (mỗi dòng một link). App tải các clip, bạn chọn và xếp thứ tự, rồi app <b>ghép thành một video dài</b>, nhận giọng nói,
+      <b>dịch sang tiếng Việt</b>, thêm phụ đề và <b>lồng tiếng</b> đúng lúc nhân vật nói (tiếng gốc tự nhỏ lại, vẫn giữ nhạc nền).
+      Douyin: chỉ lấy được từng video, video nào đòi đăng nhập thì tải về máy rồi dùng nút “Tải file lên”.</p>
+    <label class="lbl">Link kênh hoặc link các video</label>
+    <textarea id="dSrc" rows="3" placeholder="https://www.tiktok.com/@ten_kenh&#10;hoặc mỗi dòng một link video. Để trống nếu chỉ tải file lên."></textarea>
+    <label class="check mt"><input type="checkbox" id="dOwner"> Đây là kênh của tôi, hoặc chủ kênh đã cho phép tôi dùng các video này</label>
+    <div class="row mt"><button id="dMake" class="primary big">📥 Lấy video</button></div>
+    <p class="err" id="dErr"></p>
+    <details class="mt" id="dCk"><summary><b>🍪 Cookie Douyin</b> <span class="hint" id="dCkState"></span></summary>
+      <p class="hint">Douyin bắt có cookie trình duyệt mới cho tải video (<b>không cần đăng nhập</b>). Lấy một lần, hết hạn thì làm lại:</p>
+      <ol class="hint">
+        <li>Cài tiện ích <b>Get cookies.txt LOCALLY</b>
+          (<a href="https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc" target="_blank" rel="noopener">Chrome / Edge / Cốc Cốc</a> ·
+          <a href="https://addons.mozilla.org/firefox/addon/get-cookies-txt-locally/" target="_blank" rel="noopener">Firefox</a>).</li>
+        <li>Mở <a href="https://www.douyin.com" target="_blank" rel="noopener">douyin.com</a>, xem một video vài giây.</li>
+        <li>Bấm biểu tượng tiện ích → <b>Export</b> → được file <code>www.douyin.com_cookies.txt</code>.</li>
+        <li>Chọn file đó ở nút dưới đây. File chỉ lưu trên máy bạn (<code>data/douyin_cookies.txt</code>), không dán vào chat.</li>
+      </ol>
+      <div class="row"><label class="mini btnFile">📤 Chọn file cookie<input type="file" accept=".txt" hidden id="dCkFile"></label>
+        <button class="mini danger" id="dCkDel">Xoá cookie</button></div>
+    </details>
+    <div class="warn">⚠ Chỉ dùng video bạn có quyền. Video của người khác (kể cả đã dịch, lồng tiếng) vẫn bị YouTube/TikTok
+      nhận diện bản quyền, tắt kiếm tiền hoặc gậy kênh. Giọng lồng là giọng máy, một giọng cho cả phim; bản dịch tự động
+      nên xem lại và sửa trước khi đăng.</div>
+  </section>
+  <section class="card narrow mt">
+    <h2>Phim đã tạo</h2>
+    <div id="dList" class="ttList"><p class="hint">Chưa có phim nào.</p></div>
   </section>
 </main>
 

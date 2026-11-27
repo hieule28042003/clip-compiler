@@ -3,6 +3,7 @@ import os
 import re
 import subprocess
 import threading
+import time
 import urllib.request
 from pathlib import Path
 
@@ -63,7 +64,13 @@ def check_cookie_file(text):
 _cookie_copies = threading.local()
 
 
+_NO_COOKIE_UNTIL = [0.0]
+NO_COOKIE_FOR = 3600         # s
+
+
 def _cookie_opts():
+    if time.time() < _NO_COOKIE_UNTIL[0]:
+        return {}
     if COOKIES["browser"]:
         return {"cookiesfrombrowser": (COOKIES["browser"],)}
     src = COOKIES["file"]
@@ -94,7 +101,7 @@ def _base_opts():
 
 def search(keyword, count=30):
     """[{id, title, channel, duration, views}] — video thường (không Shorts), nhiều lượt xem trước."""
-    with yt_dlp.YoutubeDL({**_base_opts(), "extract_flat": True, "skip_download": True}) as y:
+    with yt_dlp.YoutubeDL({**_base_opts(), "extract_flat": True, "skip_download": True, "ignore_no_formats_error": True}) as y:
         res = y.extract_info(f"ytsearch{int(count * 1.5)}:{keyword}", download=False)
     out, seen = [], set()
     for e in res.get("entries") or []:
@@ -121,7 +128,7 @@ def timestamps(text):
 
 def check_access(video_id):
     """Đọc thông tin + định dạng một video (giống lúc tải thật): lỗi nếu cookie hỏng / bị chặn."""
-    with yt_dlp.YoutubeDL({**_base_opts(), "skip_download": True}) as y:
+    with yt_dlp.YoutubeDL({**_base_opts(), "skip_download": True, "ignore_no_formats_error": True}) as y:
         info = y.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
     if not info.get("formats"):
         raise RuntimeError("Không lấy được định dạng video")
@@ -130,7 +137,7 @@ def check_access(video_id):
 
 def analyze(video_id, comments=120):
     """Thông tin dùng để tìm khoảnh khắc: heatmap, chương, bình luận có mốc giờ."""
-    opts = {**_base_opts(), "skip_download": True}
+    opts = {**_base_opts(), "skip_download": True, "ignore_no_formats_error": True}
     if comments:
         opts.update(getcomments=True, extractor_args={
             "youtube": {"max_comments": [str(comments), "all", "0", "0"], "comment_sort": ["top"]}})
@@ -269,6 +276,19 @@ def _download_full_then_cut(video_id, start, end, out_path, hook):
     return out_path
 
 
+def no_formats(msg):
+    return "requested format is not available" in msg.lower()
+
+
+def drop_cookies():
+    """Cookie đăng nhập đôi khi làm YouTube chỉ trả ảnh, không còn định dạng nào để tải ("Requested format is not
+    available") trong khi không cookie vẫn tải được: tạm bỏ cookie một lúc. -> True nếu vừa bỏ (nên thử lại)."""
+    if not _cookie_opts():
+        return False
+    _NO_COOKIE_UNTIL[0] = time.time() + NO_COOKIE_FOR
+    return True
+
+
 class Blocked(RuntimeError):
     """YouTube tạm chặn IP vì tải quá nhiều ("Sign in to confirm you're not a bot" / HTTP 429): thử tiếp chỉ làm
     chặn lâu hơn, nên dừng ngay."""
@@ -295,6 +315,8 @@ def download(video_id, start, end, out_path, progress=lambda f: None, full=True)
         except Exception as e:  # noqa: BLE001 - lỗi mạng/yt-dlp đủ loại, thử cách sau
             if _blocked(str(e)):
                 raise Blocked(str(e)[-200:]) from None
+            if no_formats(str(e)):
+                drop_cookies()
             errors.append(str(e)[-200:])
             continue
         if got:

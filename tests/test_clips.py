@@ -2,6 +2,8 @@ import random
 import subprocess
 from pathlib import Path
 import time
+import urllib.parse as urllib_parse
+from json import dumps as json_dumps
 
 import numpy as np
 import pytest
@@ -1182,3 +1184,401 @@ def test_tiktok_lyrics_video(fake_youtube, monkeypatch):
         time.sleep(0.1)
     assert t["job"]["error"] is None and t["offset"] == 0.5 and len(fake_youtube) == n
     assert c.delete(f"/api/tiktok/{t['id']}").json()["ok"] and not out.exists()
+
+
+def test_dub_place_never_overlaps():
+    from clipmaker import dub
+    sr = dub.SR
+    lines = [(1.0, 2.0, np.zeros(int(2.0 * sr), np.float32)),       # dài gấp đôi chỗ trống -> đọc nhanh tối đa
+             (2.0, 5.0, np.zeros(int(1.0 * sr), np.float32)),
+             (2.1, 9.0, np.zeros(int(1.0 * sr), np.float32))]
+    (s1, v1), (s2, v2), (s3, v3) = dub.place(lines, 10)
+    assert s1 == 1.0 and v1 == dub.MAX_SPEED
+    assert s2 >= s1 + 2.0 / v1 and v2 == 1.0               # không đè lên câu trước
+    assert s3 >= s2 + 1.0 and v3 == 1.0
+
+
+def test_dub_upload_dub_and_edit(fake_youtube, monkeypatch, tmp_path):
+    from clipmaker import dub
+    monkeypatch.setattr(dub, "transcribe", lambda src, lang=None: ("zh", [{"s": 0.5, "e": 1.8, "src": "你好"},
+                                                                          {"s": 2.0, "e": 3.2, "src": "再见"}]))
+    monkeypatch.setattr(dub, "translate", lambda texts, lang, tl="vi": [f"câu {t}" for t in texts])
+    said = []
+
+    def tts(items, voice, report=None, stop=None):
+        for text, out in items:
+            said.append(text)
+            compose.run(["-f", "lavfi", "-i", "sine=frequency=500:duration=0.8", str(out)])
+    monkeypatch.setattr(dub, "_tts_all", tts)
+    c = TestClient(server.app)
+    assert c.post("/api/dub", json={"source": "", "owner": False}).status_code == 400
+    d = c.post("/api/dub", json={"source": "", "owner": True}).json()
+    files = []
+    for i, (w, h) in enumerate(((360, 640), (360, 640), (640, 360))):
+        f = tmp_path / f"c{i}.mp4"
+        compose.run(["-f", "lavfi", "-i", f"color=c=blue:s={w}x{h}:d=4", "-f", "lavfi", "-i", "sine=d=4",
+                     "-shortest", "-c:v", "libx264", "-c:a", "aac", str(f)])
+        files.append(("files", (f.name, f.read_bytes(), "video/mp4")))
+    d = c.post(f"/api/dub/{d['id']}/upload", files=files).json()
+    keys = [x["key"] for x in d["clips"]]
+    assert len(keys) == 3 and all(x["duration"] for x in d["clips"])
+    # bỏ clip giữa, đảo thứ tự
+    c.put(f"/api/dub/{d['id']}", json={"order": [keys[2], keys[1], keys[0]], "on": {keys[1]: False}})
+    assert c.post(f"/api/dub/{d['id']}/build").status_code == 200
+
+    def wait():
+        for _ in range(3000):
+            x = next(y for y in c.get("/api/dub").json() if y["id"] == d["id"])
+            if x["job"]["done"]:
+                return x
+            time.sleep(0.1)
+    d = wait()
+    assert d["job"]["error"] is None, d["job"]["error"]
+    assert d["size"] == [1080, 1920] and abs(d["duration"] - 8) < 0.4 and not d["warn"]
+    assert [x["key"] for x in d["clips"]] == [keys[2], keys[1], keys[0]] and keys[1] not in d["segs"]
+    assert sorted(said) == ["câu 你好", "câu 再见"]                # câu trùng chữ chỉ đọc một lần
+    info = dub.probe(server.DATA / "dub" / d["id"] / "output.mp4")
+    assert info["audio"] and (info["w"], info["h"]) == (1080, 1920)
+    # sửa bản dịch: dựng lại, đọc câu mới, không nhận giọng lại
+    monkeypatch.setattr(dub, "transcribe", lambda *a, **k: (_ for _ in ()).throw(AssertionError("nhận giọng lại")))
+    c.put(f"/api/dub/{d['id']}", json={"segs": {keys[0]: ["Chào sư phụ", "Tạm biệt"]}})
+    said.clear()
+    c.post(f"/api/dub/{d['id']}/build")
+    d = wait()
+    assert d["job"]["error"] is None, d["job"]["error"]
+    assert d["segs"][keys[0]]["items"][0]["tr"] == "Chào sư phụ" and "Chào sư phụ" in said
+    assert c.delete(f"/api/dub/{d['id']}").json()["ok"]
+
+
+def test_dub_scan_orders_episodes_and_flags_duplicates(fake_youtube, monkeypatch, tmp_path):
+    from clipmaker import dub
+    lines = {"a": "师父你为什么不让我下山我已经练了十年", "b": "因为山下的世界很危险你还没有准备好"}
+    c = TestClient(server.app)
+    d = c.post("/api/dub", json={"source": "", "owner": True}).json()
+    f = tmp_path / "x.mp4"
+    compose.run(["-f", "lavfi", "-i", "color=c=red:s=360x640:d=3.5", "-f", "lavfi", "-i", "sine=d=3.5", "-shortest",
+                 "-c:v", "libx264", "-c:a", "aac", str(f)])
+    names = ["Phim hay 第2集", "Phim hay 第1集", "Phim hay 第2集 (đăng lại)", "Hậu trường"]
+    d = c.post(f"/api/dub/{d['id']}/upload",
+               files=[("files", (n + ".mp4", f.read_bytes(), "video/mp4")) for n in names]).json()
+    by_title = {x["title"]: x["key"] for x in d["clips"]}
+    said = {by_title[names[0]]: lines["b"], by_title[names[1]]: lines["a"], by_title[names[2]]: lines["b"],
+            by_title[names[3]]: ""}
+    order_seen = []
+
+    def transcribe(src, lang=None):
+        key = Path(src).stem
+        order_seen.append(key)
+        return "zh", ([{"s": 0.3, "e": 2.0, "src": said[key]}] if said[key] else [])
+    monkeypatch.setattr(dub, "transcribe", transcribe)
+    monkeypatch.setattr(dub, "translate", lambda texts, lang, tl="vi": [f"vi {t}" for t in texts])
+    c.post(f"/api/dub/{d['id']}/scan")
+    for _ in range(3000):
+        d = next(y for y in c.get("/api/dub").json() if y["id"] == d["id"])
+        if d["job"]["done"]:
+            break
+        time.sleep(0.1)
+    assert d["job"]["error"] is None, d["job"]["error"]
+    assert d["scanned"] and len(order_seen) == 4
+    titles = [x["title"] for x in d["clips"]]
+    assert titles.index(names[1]) < titles.index(names[0])           # tập 1 trước tập 2
+    rv, on = d["review"], {x["title"]: x["on"] for x in d["clips"]}
+    assert rv[by_title[names[1]]]["ep"] == 1 and rv[by_title[names[0]]]["ep"] == 2
+    dup = [k for k in (by_title[names[0]], by_title[names[2]]) if any(x.startswith("dup:") for x in rv[k]["flags"])]
+    assert len(dup) == 1 and sum(on[n] for n in (names[0], names[2])) == 1     # chỉ giữ một bản
+    assert "silent" in rv[by_title[names[3]]]["flags"] and on[names[3]]
+    assert c.get(f"/api/dub/{d['id']}/thumb/{by_title[names[1]]}.jpg").status_code == 200
+    assert c.get(f"/api/dub/{d['id']}/src/{by_title[names[1]]}").status_code == 200
+
+
+def test_douyin_links_and_cookie_file(fake_youtube, monkeypatch, tmp_path):
+    from clipmaker import dub
+    vid = "https://www.douyin.com/video/7710584006282817146"
+    for u in ("https://www.douyin.com/jingxuan?modal_id=7710584006282817146",
+              "https://www.douyin.com/user/MS4wLjABAAAA?from_tab_name=main&modal_id=7710584006282817146",
+              "https://www.douyin.com/note/7710584006282817146",
+              "https://www.iesdouyin.com/share/video/7710584006282817146/?region=CN", vid):
+        assert dub.canon(u) == vid
+    assert dub.canon("https://www.tiktok.com/@a/video/1") == "https://www.tiktok.com/@a/video/1"
+    monkeypatch.setattr(dub, "DOUYIN_COOKIES", tmp_path / "dy.txt")
+
+    def no_net(*a):
+        raise dub.DubError("không tải trong test")
+    monkeypatch.setattr(dub, "download", no_net)
+    c = TestClient(server.app)
+    # link video mở từ trang người dùng (có modal_id) là một video, không phải cả kênh
+    d = c.post("/api/dub", json={"source": "https://www.douyin.com/user/MS4w?modal_id=7710584006282817146",
+                                 "owner": True}).json()
+    assert [x["key"] for x in d["clips"]] == ["7710584006282817146"]
+    c.post(f"/api/dub/{d['id']}/cancel")
+    bad = c.post("/api/dub-cookies", files={"file": ("c.txt", b".youtube.com\tTRUE\t/\tTRUE\t0\tSID\tx\n")})
+    assert bad.status_code == 400 and "douyin" in bad.json()["detail"]
+    ok = c.post("/api/dub-cookies", files={"file": ("c.txt", b".douyin.com\tTRUE\t/\tTRUE\t0\tttwid\tx\n")}).json()
+    assert ok["has"] and (tmp_path / "dy.txt").exists()
+    assert not c.delete("/api/dub-cookies").json()["has"]
+
+
+def test_dub_tts_hang_does_not_block(monkeypatch, tmp_path):
+    """Dịch vụ giọng đọc treo hẳn ở một câu: không được đứng mãi, câu đó bỏ tiếng, các câu khác vẫn đọc."""
+    import asyncio
+    import edge_tts
+    from clipmaker import dub
+
+    class Fake:
+        def __init__(self, text, voice, rate=""):
+            self.text = text
+
+        async def save(self, path):
+            if self.text == "treo":
+                await asyncio.Event().wait()            # không bao giờ trả lời
+            compose.run(["-f", "lavfi", "-i", "sine=duration=0.5", "-f", "mp3", path])
+    monkeypatch.setattr(edge_tts, "Communicate", Fake)
+    monkeypatch.setattr(dub, "TTS_TIMEOUT", 0.3)
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(asyncio, "sleep", lambda s: real_sleep(0))         # không chờ giữa các lần thử
+    seen = []
+    t0 = time.time()
+    segs = [{"s": 0.5, "e": 1.5, "tr": "một"}, {"s": 2.0, "e": 3.0, "tr": "treo"}, {"s": 3.5, "e": 4.5, "tr": "ba"}]
+    wav, missed = dub.dub_track(segs, 6.0, "vi-VN-HoaiMyNeural", tmp_path / "d.wav", tmp_path / "tts",
+                                lambda done, n: seen.append((done, n)))
+    assert time.time() - t0 < 30 and missed == 1 and wav.exists()
+    assert seen[-1] == (3, 3)
+    # dựng lại: câu đã đọc lấy từ bộ đệm, chỉ thử lại câu lỗi
+    seen.clear()
+    dub.dub_track(segs, 6.0, "vi-VN-HoaiMyNeural", tmp_path / "d.wav", tmp_path / "tts", lambda d, n: seen.append(n))
+    assert seen == [1]
+
+
+def _wait_posts(c, done=lambda p: all(v["state"] in ("ok", "err") for v in p["status"].values())):
+    for _ in range(300):
+        posts = c.get("/api/social").json()["posts"]
+        if posts and all(done(p) for p in posts):
+            return posts
+        time.sleep(0.1)
+    raise AssertionError("chưa đăng xong")
+
+
+def test_social_connect_and_post(fake_youtube, monkeypatch, tmp_path):
+    from clipmaker import social
+    monkeypatch.setattr(server, "SOCIAL_FILE", tmp_path / "social.json")
+    calls = []
+    monkeypatch.setattr(social, "fb_exchange", lambda app, sec, code, red: (
+        calls.append(("fbx", code, red)) or [{"id": "p1", "name": "Trang Phim", "token": "PT"}]))
+    monkeypatch.setattr(social, "tt_exchange", lambda key, sec, code, red, ver: (
+        calls.append(("ttx", code, len(ver))) or {"open_id": "o", "access": "A1", "refresh": "R", "exp": 0,
+                                                  "rexp": time.time() + 1e6, "scope": "video.upload"}))
+    monkeypatch.setattr(social, "tt_user", lambda a: "kenh_cua_toi")
+    monkeypatch.setattr(social, "tt_refresh", lambda key, sec, r: (
+        calls.append(("refresh", r)) or {"access": "A2", "refresh": "R2", "exp": time.time() + 3600,
+                                         "rexp": time.time() + 1e6}))
+    monkeypatch.setattr(social, "fb_post", lambda page, tok, path, title, desc, dur, vert: (
+        calls.append(("fb", page, tok, desc, vert)) or ("v9", "https://facebook.com/reel/v9")))
+    monkeypatch.setattr(social, "tt_inbox", lambda access, path: calls.append(("tt", access)) or "pub1")
+    monkeypatch.setattr(social, "tt_wait", lambda access, pid: "SEND_TO_USER_INBOX")
+    c = TestClient(server.app, follow_redirects=False)
+    assert c.get("/api/social/fb/connect").status_code == 400          # chưa nhập App ID
+    v = c.put("/api/social", json={"fb_app_id": "123", "fb_secret": "FBSECRET", "tt_key": "k", "tt_secret": "TTSECRET"}).json()
+    assert v["fb"]["has_secret"] and "FBSECRET" not in json_dumps(v) and "TTSECRET" not in json_dumps(v)
+    for net in ("fb", "tt"):
+        url = c.get(f"/api/social/{net}/connect").json()["url"]
+        state = urllib_parse.parse_qs(urllib_parse.urlparse(url).query)["state"][0]
+        if net == "tt":
+            assert "code_challenge" in url and "video.upload" in urllib_parse.unquote(url)
+        r = c.get(f"/api/social/{net}/callback", params={"code": "C", "state": state})
+        assert r.status_code in (302, 307) and "L%E1%BB%97i" not in r.headers["location"]
+    # state lạ: không nhận
+    assert "L%E1%BB%97i" in c.get("/api/social/fb/callback", params={"code": "C", "state": "x"}).headers["location"]
+    v = c.get("/api/social").json()
+    assert v["fb"]["page"] == "p1" and v["tt"]["connected"] and v["tt"]["name"] == "kenh_cua_toi"
+    assert '"PT"' not in json_dumps(v) and "A1" not in json_dumps(v)              # không lộ token ra giao diện
+    # video dọc có sẵn: đăng ngay lên cả hai
+    d = c.post("/api/dub", json={"source": "", "owner": True}).json()
+    out = server.DATA / "dub" / d["id"] / "output.mp4"
+    assert c.post("/api/social/posts", json={"kind": "dub", "ref": d["id"], "targets": ["tiktok"]}).status_code == 400
+    _fake_video(out, 3, size="360x640")
+    c.post("/api/social/posts", json={"kind": "dub", "ref": d["id"], "targets": ["tiktok", "facebook"], "caption": "Tập 1 #phim"})
+    p = _wait_posts(c)[0]
+    assert p["status"]["facebook"]["state"] == "ok" and p["status"]["facebook"]["link"].endswith("v9")
+    assert p["status"]["tiktok"]["state"] == "ok" and "hộp thư" in p["status"]["tiktok"]["msg"]
+    assert ("fb", "p1", "PT", "Tập 1 #phim", True) in calls
+    assert ("refresh", "R") in calls and ("tt", "A2") in calls           # token TikTok hết hạn -> tự làm mới
+    # hẹn giờ: chưa tới giờ thì không đăng
+    n = len(calls)
+    c.post("/api/social/posts", json={"kind": "dub", "ref": d["id"], "targets": ["facebook"], "at": time.time() + 3600})
+    server._social_tick()
+    later = [p for p in c.get("/api/social").json()["posts"] if p["at"] > time.time() + 60][0]
+    assert later["status"]["facebook"]["state"] == "wait" and len(calls) == n
+    # lỗi một bài: báo lỗi, thử lại được
+    monkeypatch.setattr(social, "fb_post", lambda *a: (_ for _ in ()).throw(social.SocialError("hết quyền")))
+    c.post("/api/social/posts", json={"kind": "dub", "ref": d["id"], "targets": ["facebook"]})
+    posts = _wait_posts(c, lambda p: p["at"] > time.time() + 60 or p["status"]["facebook"]["state"] in ("ok", "err"))
+    bad = next(p for p in posts if p["status"]["facebook"]["state"] == "err")
+    assert bad["status"]["facebook"]["msg"] == "hết quyền"
+    monkeypatch.setattr(social, "fb_post", lambda *a: ("v10", "https://facebook.com/x"))
+    c.post(f"/api/social/posts/{bad['id']}/retry")
+    posts = _wait_posts(c, lambda p: p["at"] > time.time() + 60 or p["status"]["facebook"]["state"] in ("ok", "err"))
+    assert next(p for p in posts if p["id"] == bad["id"])["status"]["facebook"]["state"] == "ok"
+    assert c.delete(f"/api/social/posts/{later['id']}").status_code == 200
+
+
+def test_social_tiktok_chunks_and_pkce():
+    from clipmaker import social
+    assert social.tt_chunks(30 << 20) == (30 << 20, 1)
+    size = 200 * 1024 * 1024 + 123
+    chunk, n = social.tt_chunks(size)
+    assert chunk == 10 << 20 and n == 20 and size - chunk * (n - 1) <= 128 << 20    # phần cuối gộp phần dư
+    v, ch = social.tt_pkce()
+    import hashlib as _h
+    assert 43 <= len(v) <= 128 and ch == _h.sha256(v.encode()).hexdigest()
+
+
+def test_captions_from_real_content():
+    from clipmaker import caption
+    lines = ["Con đi đâu vậy?", "Mẹ ơi, tại sao mẹ lại bỏ con ở trại trẻ mồ côi?", "ừ", "Đi thôi"]
+    tt = caption.for_dub("Mẹ Kế", lines, "zh", [1, 2, 3], "tiktok", seed=1)
+    fb = caption.for_dub("Mẹ Kế", lines, "zh", [1, 2, 3], "facebook", seed=1)
+    assert "Tập 1–3" in tt and "#mek" in tt and "#phimtrung" in tt and "#longtieng" in tt
+    assert any(q in tt for q in lines[:2])                        # câu mồi lấy đúng lời thoại thật
+    assert "#phimgiadinh" in tt and "#camdong" in tt
+    n = lambda c: len([w for w in c.split() if w.startswith("#")])
+    assert n(tt) == 8 and n(fb) == 5 and len(tt) <= 2200
+    assert "Follow để xem tập tiếp theo" in tt or "Theo dõi" in tt or "Lưu lại" in tt
+    assert caption.for_dub("Mẹ Kế", lines, seed=1) != caption.for_dub("Mẹ Kế", lines, seed=2)   # Viết lại ra bản khác
+    assert "#phimghep" not in caption.for_dub("Phim ghép", [], seed=1)
+    one = caption.for_dub("X Y", ["Anh ấy là ai vậy?"], eps=[], seed=3)
+    assert "tập tiếp theo" not in one                                 # không có nhiều tập thì không hứa tập sau
+    ly = caption.for_lyrics("Sơn Tùng M-TP", "Chúng Ta Của Hiện Tại (Remake)", ["Còn ai thương ai, mong ai?", "Em ơi"],
+                            seed=1)
+    assert "#chungtacuahientai" in ly and "#sontungmtp" in ly and "#nhacyeu" in ly and "“" in ly
+    assert caption.hashtag("Đen Vâu") == "#denvau"
+
+
+def test_mv_plan_subtitles_and_texts(tmp_path):
+    from clipmaker import mv
+    tl = [(2.0, 6.0, "故事的小黄花"), (6.0, 10.5, "从出生那年就飘着"), (10.5, 15.0, "童年的荡秋千"),
+          (15.0, 40.0, "随记忆一直晃到现在")]
+    assert mv.lang_of([x[2] for x in tl]) == "zh" and mv.lang_of(["Anh còn nợ em"]) == "vi"
+    scenes, images = mv.plan(tl, 42.0, n_max=4)
+    assert abs(sum(s["d"] for s in scenes) - 42.0) < 0.01
+    assert all(mv.SCENE_MIN - 0.01 <= s["d"] <= mv.SCENE_MAX + 0.01 for s in scenes[:-1])
+    assert len(images) == 4 and images[0]["kind"] == "stage" and {s["img"] for s in scenes} == {0, 1, 2, 3}
+    assert all(any(abs(s["s"] - t0) < 0.01 for t0, _, _ in tl) or s["s"] == 0 or s["d"] <= mv.SCENE_MAX
+               for s in scenes)
+    p = mv.prompt({"kind": "story", "line": "x"}, "f", "Little yellow flower in the story")
+    assert "Little yellow flower" in p and "glasses" not in p
+    assert "glasses" in mv.prompt({"kind": "singer", "line": ""}, "f") and "suit" in mv.prompt({"kind": "stage"}, "m")
+    vi = {"故事的小黄花": "Đóa hoa vàng nhỏ trong câu chuyện"}
+    for fmt in "hv":
+        a = mv.ass(tl, vi, tmp_path / f"{fmt}.ass", fmt).read_text(encoding="utf-8")
+        assert "\\kf" in a and "\\N{\\rVi}Đóa hoa vàng nhỏ" in a and mv.CJK_FONT in a
+        assert a.count("Dialogue:") == 4 and a.count("\\rVi") == 1      # câu chưa dịch: chỉ lời gốc
+    title, desc = mv.youtube_text("晴天", "周杰伦", "zh", tl + tl, vi)
+    assert title == "晴天 – 周杰伦 | Vietsub" and desc.count("故事的小黄花") == 1 and mv.AI_NOTE in desc
+
+
+def test_youtube_drops_cookies_when_no_formats(monkeypatch):
+    monkeypatch.setitem(yt.COOKIES, "browser", "chrome")
+    monkeypatch.setattr(yt, "_NO_COOKIE_UNTIL", [0.0])
+    assert yt._cookie_opts() == {"cookiesfrombrowser": ("chrome",)}
+    assert yt.no_formats("ERROR: [youtube] x: Requested format is not available. Use --list-formats")
+    assert yt.drop_cookies() and yt._cookie_opts() == {} and not yt.drop_cookies()
+
+
+def test_mv_build_edit_and_redraw(fake_youtube, monkeypatch):
+    from clipmaker import dub, lyrics, mv
+    words = ["故事的小黄花", "从出生那年就飘着", "童年的荡秋千", "随记忆一直晃到现在", "吹着前奏望着天空", "我想起花瓣试着掉落"]
+    lrc = "".join(f"[00:{s:02d}.00]{words[k % len(words)]}\n" for k, s in enumerate(range(2, 58, 4)))
+    monkeypatch.setattr(lyrics, "_get", lambda path, params: [
+        {"trackName": "晴天", "artistName": "周杰伦", "duration": 60, "syncedLyrics": lrc}])
+    songs = [{"id": "audaudaudau", "title": "周杰伦 晴天 Official Audio", "duration": 60, "views": 1e6}]
+    real_search = yt.search
+    monkeypatch.setattr(yt, "search", lambda kw, n: songs if "晴天" in kw else real_search(kw, n))
+
+    def audio(vid, out, trim=True):
+        compose.run(["-f", "lavfi", "-i", "sine=frequency=300:duration=60", "-ac", "2", str(out)])
+        return out
+    monkeypatch.setattr(music, "download_audio", audio)
+    monkeypatch.setattr(dub, "translate", lambda texts, lang, tl="vi": [f"{tl}: memory of {t} in the rain" for t in texts])
+    drawn = []
+
+    def draw(text, seed, out, key="", stop=lambda: False, wait=lambda s: None):
+        drawn.append(text)
+        compose.run(["-f", "lavfi", "-i", f"color=c=0x{seed % 0xFFFFFF:06x}:s=1344x768", "-frames:v", "1", str(out)])
+        return out
+    monkeypatch.setattr(mv, "draw", draw)
+    c = TestClient(server.app)
+
+    def wait(mid):
+        for _ in range(3000):
+            t = next(x for x in c.get("/api/mv").json() if x["id"] == mid)
+            if t["job"]["done"]:
+                return t
+            time.sleep(0.1)
+    t = c.post("/api/mv", json={"song": "周杰伦 - 晴天", "length": 30, "formats": "hv", "singer": "f"}).json()
+    t = wait(t["id"])
+    assert t["job"]["error"] is None, t["job"]["error"]
+    assert t["outputs"] == ["h", "v"] and t["lang"] == "zh" and t["title"] == "周杰伦 - 晴天"
+    assert len(drawn) == len(t["images"]) == len(t["drawn"]) and any("en:" in d for d in drawn)  # cảnh minh hoạ theo lời
+    assert all(t["vi"][x] == f"vi: memory of {x} in the rain" for x in t["lines"])
+    f = server.DATA / "mv" / t["id"]
+    for fmt, (w, h) in mv.SIZES.items():
+        info = dub.probe(f / f"{fmt}.mp4")
+        assert (info["w"], info["h"]) == (w, h) and info["audio"] and abs(info["duration"] - t["duration"]) < 0.3
+    assert (f / "thumb.jpg").exists() and "Vietsub" in t["yt_title"]
+    assert "#vietsub" in t["caption"] and "#nhactrung" in t["caption"] and "vi:" in t["caption"]
+    assert server._social_video("mv", f).name == "v.mp4"
+    # sửa lời dịch, vẽ lại một ảnh: đánh dấu cần dựng lại, không vẽ lại cả bộ
+    first = t["lines"][0]
+    t = c.put(f"/api/mv/{t['id']}", json={"vi": {first: "Đóa hoa vàng nhỏ", "lạ": "x"}}).json()
+    assert t["dirty"] and t["vi"][first] == "Đóa hoa vàng nhỏ" and "lạ" not in t["vi"]
+    n = len(drawn)
+    c.post(f"/api/mv/{t['id']}/images/1/redraw", json={"prompt": "a girl in the rain"})
+    t = wait(t["id"])
+    assert t["job"]["error"] is None and len(drawn) == n + 1 and drawn[-1] == "a girl in the rain"
+    assert t["images"][1]["custom"] and "1" in t["img_v"]
+    c.post(f"/api/mv/{t['id']}/build")
+    t = wait(t["id"])
+    assert t["job"]["error"] is None and not t["dirty"] and len(drawn) == n + 1
+    assert "Đóa hoa vàng nhỏ" in (f / "mv.json").read_text(encoding="utf-8")
+    assert c.get(f"/api/mv/{t['id']}/files/../mv.json").status_code == 404
+    assert c.delete(f"/api/mv/{t['id']}").json()["ok"] and not f.exists()
+
+
+def test_mv_story_prompt_skips_note_singing():
+    from clipmaker import mv
+    assert mv.STORY_FALLBACK in mv.prompt({"kind": "story"}, "f", "Re So So Si Do Si La")
+    assert mv.STORY_FALLBACK in mv.prompt({"kind": "story"}, "f", "la la")
+    assert "petals falling" in mv.prompt({"kind": "story"}, "f", "I remember the petals falling")
+
+
+def test_ui_files_are_revalidated():
+    c = TestClient(server.app)
+    for path in ("/", "/app.js", "/style.css"):
+        r = c.get(path)
+        assert r.status_code == 200 and r.headers["cache-control"] == "no-cache"
+    assert "showMV" in c.get("/app.js").text and 'href="#/mv"' in c.get("/").text
+
+
+def test_info_only_calls_ignore_missing_formats(monkeypatch):
+    """Cookie đăng nhập có lúc làm YouTube không trả định dạng nào: đọc thông tin (tên, độ dài, heatmap) vẫn phải chạy."""
+    import yt_dlp
+    seen = []
+
+    class FakeYDL:
+        def __init__(self, opts):
+            seen.append(opts)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def extract_info(self, url, download=False):
+            if not seen[-1].get("ignore_no_formats_error"):
+                raise yt_dlp.utils.DownloadError("ERROR: [youtube] x: Requested format is not available")
+            return {"id": "K2sZVlw5bts", "title": "周杰伦 - 晴天", "channel": "x", "duration": 270, "entries": []}
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", FakeYDL)
+    assert music.info("https://www.youtube.com/watch?v=K2sZVlw5bts")["duration"] == 270
+    yt.analyze("K2sZVlw5bts", 0)
+    assert all(o.get("ignore_no_formats_error") for o in seen)

@@ -27,7 +27,7 @@ async function copyText(text, btn) {
 }
 
 // ---------- khung trang + sidebar ----------
-const PAGES = ["home", "shortsPage", "musicPage", "tiktokPage", "mixEditor", "projectsPage", "trends", "channels", "settings", "editor"];
+const PAGES = ["home", "shortsPage", "musicPage", "tiktokPage", "mvPage", "dubPage", "mixEditor", "projectsPage", "trends", "channels", "settings", "editor"];
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const views = (n) => n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}K` : `${n || 0}`;
 let SEED = null;              // ý tưởng mang từ trang Xu hướng sang: {keyword, videos, ref}
@@ -876,7 +876,119 @@ async function cookieAction(fn, okMsg) {
 async function showSettings() {
   V = null;
   showPage("settings", "settings", "Cài đặt");
+  const m = location.hash.match(/[?&]social=([^&]*)/);
+  $("#soMsg").textContent = m ? decodeURIComponent(m[1]) : "";
+  $("#soMsg").classList.toggle("bad", !!m && decodeURIComponent(m[1]).startsWith("Lỗi"));
+  renderSocial(await api("/api/social"));
   renderCookies(await api("/api/settings/cookies"));
+}
+
+// ---------- 📤 đăng TikTok / Facebook ----------
+let SO = null, soPoll = null;
+const NET = { tiktok: "TikTok", facebook: "Facebook" };
+
+function renderSocial(v) {
+  SO = v;
+  clearTimeout(soPoll);
+  $("#fbRedirect").textContent = v.fb.redirect;
+  $("#fbSite").textContent = v.fb.redirect.replace(/\/api\/social\/fb\/callback$/, "/");
+  $("#ttRedirect").textContent = v.tt.redirect;
+  if (document.activeElement !== $("#fbApp")) $("#fbApp").value = v.fb.app_id;
+  if (document.activeElement !== $("#ttKey")) $("#ttKey").value = v.tt.key;
+  $("#fbSecret").placeholder = v.fb.has_secret ? "App secret (đã lưu)" : "App secret";
+  $("#ttSecret").placeholder = v.tt.has_secret ? "Client secret (đã lưu)" : "Client secret";
+  const fbOn = v.fb.pages.length > 0;
+  $("#fbState").textContent = fbOn ? "· đã kết nối" : "· chưa kết nối";
+  $("#ttState").textContent = v.tt.connected ? `· đã kết nối${v.tt.name ? ": " + v.tt.name : ""}` : "· chưa kết nối";
+  $("#fbOff").classList.toggle("hidden", !fbOn);
+  $("#ttOff").classList.toggle("hidden", !v.tt.connected);
+  $("#fbPageBox").classList.toggle("hidden", !fbOn);
+  $("#fbPage").innerHTML = v.fb.pages.map((p) => `<option value="${esc(p.id)}" ${p.id === v.fb.page ? "selected" : ""}>${esc(p.name)}</option>`).join("");
+  const box = $("#soPosts");
+  box.innerHTML = v.posts.length ? v.posts.slice().reverse().map((p) => `<div class="soPost" data-id="${p.id}">
+      <div><b>${esc(p.title || "Video")}</b> <span class="hint">· ${new Date(p.at * 1000).toLocaleString("vi-VN")}</span>
+        <div class="st">${Object.entries(p.status).map(([t, x]) => `<span class="badge ${x.state === "ok" ? "okB" : x.state === "err" ? "errB" : ""}">${NET[t]}: ${
+          { wait: p.at > Date.now() / 1000 ? "chờ tới giờ" : "chờ đăng", run: "đang đăng…", ok: "xong", err: "lỗi" }[x.state]}</span>
+          ${x.msg ? `<span class="hint">${esc(x.msg)}</span>` : ""}${x.link ? `<a class="link mini" href="${esc(x.link)}" target="_blank" rel="noopener">Xem ↗</a>` : ""}`).join("")}</div></div>
+      <div class="row">${Object.values(p.status).some((x) => x.state === "err") ? `<button class="mini" data-so="retry">Thử lại</button>` : ""}
+        ${p.caption ? `<button class="mini" data-so="copy">Copy caption</button>` : ""}
+        ${Object.values(p.status).some((x) => x.state === "run") ? "" : `<button class="mini danger" data-so="del">Xoá</button>`}</div>
+    </div>`).join("") : `<p class="hint">Chưa có bài nào.</p>`;
+  box.querySelectorAll("[data-so]").forEach((b) => b.onclick = async () => {
+    const id = b.closest(".soPost").dataset.id, p = v.posts.find((x) => x.id === id);
+    try {
+      if (b.dataset.so === "copy") return copyText(p.caption, b);
+      if (b.dataset.so === "del" && !confirm("Xoá bài này khỏi lịch đăng? (bài đã đăng vẫn còn trên TikTok / Facebook)")) return;
+      renderSocial(await api(`/api/social/posts/${id}${b.dataset.so === "retry" ? "/retry" : ""}`, { method: b.dataset.so === "del" ? "DELETE" : "POST" }));
+    } catch (e) { alert(e.message); }
+  });
+  const now = Date.now() / 1000;
+  if (location.hash.startsWith("#/settings") && v.posts.some((p) => Object.values(p.status).some((x) => x.state === "run" || (x.state === "wait" && p.at < now + 3600))))
+    soPoll = setTimeout(async () => renderSocial(await api("/api/social")), 4000);
+}
+
+const soSave = (body) => api("/api/social", json("PUT", body)).then(renderSocial).catch((e) => alert(e.message));
+$("#fbSave").onclick = () => soSave({ fb_app_id: $("#fbApp").value, fb_secret: $("#fbSecret").value }).then(() => $("#fbSecret").value = "");
+$("#ttSave").onclick = () => soSave({ tt_key: $("#ttKey").value, tt_secret: $("#ttSecret").value }).then(() => $("#ttSecret").value = "");
+$("#fbPage").onchange = () => soSave({ fb_page: $("#fbPage").value });
+for (const net of ["fb", "tt"]) {
+  $(`#${net}Connect`).onclick = async () => {
+    try { location.href = (await api(`/api/social/${net}/connect`)).url; } catch (e) { alert(e.message); }
+  };
+  $(`#${net}Off`).onclick = async () => {
+    if (confirm("Ngắt kết nối? Các bài đang chờ đăng lên đây sẽ lỗi.")) renderSocial(await api(`/api/social/${net}/disconnect`, { method: "POST" }));
+  };
+}
+
+// form đăng dưới một video (TikTok lời bài hát / phim lồng tiếng)
+async function openPost(host, kind, ref, caption) {
+  const old = host.querySelector(".postForm");
+  if (old) { old.remove(); return; }
+  const v = SO = await api("/api/social").catch(() => SO);
+  const fbOn = v && v.fb.page, ttOn = v && v.tt.connected;
+  const f = document.createElement("div");
+  f.className = "postForm";
+  const local = new Date(Date.now() + 3600e3 - new Date().getTimezoneOffset() * 60e3).toISOString().slice(0, 16);
+  f.innerHTML = `<b>📤 Đăng video này</b>
+    ${!fbOn && !ttOn ? `<p class="note">Chưa kết nối TikTok / Facebook. Vào <a href="#/settings">⚙ Cài đặt</a> → “Đăng TikTok & Facebook”.</p>` : ""}
+    <div class="row">
+      <label class="check"><input type="checkbox" data-t="tiktok" ${ttOn ? "checked" : "disabled"}> TikTok (vào hộp nháp)</label>
+      <label class="check"><input type="checkbox" data-t="facebook" ${fbOn ? "checked" : "disabled"}> Facebook${fbOn ? ` (${esc(v.fb.pages.find((p) => p.id === v.fb.page)?.name || "")})` : ""}</label></div>
+    <div class="row"><span class="hint">Caption + hashtag (tạo từ nội dung video, sửa thoải mái)</span>
+      <button class="mini" data-p="regen">✨ Viết lại</button></div>
+    <textarea data-p="caption" rows="7" placeholder="Caption / mô tả">${esc(caption || "")}</textarea>
+    <span class="hint">TikTok không nhận caption qua hộp nháp: khi mở video trong app TikTok, dán caption (nút Copy caption ở ⚙ Cài đặt → Lịch đăng).</span>
+    <div class="row"><label class="check"><input type="radio" name="when_${ref}" value="now" checked> Đăng ngay</label>
+      <label class="check"><input type="radio" name="when_${ref}" value="at"> Hẹn giờ</label>
+      <input type="datetime-local" data-p="at" value="${local}"></div>
+    <div class="row"><button class="primary" data-p="go">📤 Đăng</button><button class="mini" data-p="close">Đóng</button></div>
+    <p class="err" data-p="err"></p>`;
+  host.appendChild(f);
+  f.querySelector("[data-p=close]").onclick = () => f.remove();
+  let seed = 0;
+  const regen = async () => {
+    const net = f.querySelector("[data-t=tiktok]").checked || !f.querySelector("[data-t=facebook]").checked ? "tiktok" : "facebook";
+    try {
+      const r = await api(`/api/caption?kind=${kind}&ref=${ref}&net=${net}${seed ? `&seed=${seed}` : ""}`);
+      f.querySelector("[data-p=caption]").value = r.caption;
+    } catch (e) { f.querySelector("[data-p=err]").textContent = e.message; }
+    seed = Math.floor(Math.random() * 1e9);
+  };
+  f.querySelector("[data-p=regen]").onclick = regen;
+  if (!caption) regen();
+  f.querySelector("[data-p=go]").onclick = async (e) => {
+    const targets = [...f.querySelectorAll("[data-t]:checked")].map((x) => x.dataset.t);
+    const later = f.querySelector(`input[name="when_${ref}"]:checked`).value === "at";
+    const at = later ? new Date(f.querySelector("[data-p=at]").value).getTime() / 1000 : 0;
+    if (!targets.length) { f.querySelector("[data-p=err]").textContent = "Chọn TikTok hoặc Facebook"; return; }
+    if (later && !(at > Date.now() / 1000)) { f.querySelector("[data-p=err]").textContent = "Chọn giờ trong tương lai"; return; }
+    e.target.disabled = true;
+    try {
+      SO = await api("/api/social/posts", json("POST", { kind, ref, targets, caption: f.querySelector("[data-p=caption]").value, at }));
+      f.innerHTML = `<p class="note">${later ? `Đã hẹn ${new Date(at * 1000).toLocaleString("vi-VN")}` : "Đang đăng"} lên ${targets.map((t) => NET[t]).join(" + ")}.
+        Xem tiến độ ở <a href="#/settings">⚙ Cài đặt → Lịch đăng</a>.</p>`;
+    } catch (err) { f.querySelector("[data-p=err]").textContent = err.message; e.target.disabled = false; }
+  };
 }
 
 $("#ckFile").onchange = () => {
@@ -1140,13 +1252,15 @@ function renderTT(el, t) {
       <span class="hint">${len}${t.duration ? ` (${fmt(t.duration)})` : ""} · nền “${esc(t.bg)}” · ${new Date(t.created * 1000).toLocaleString("vi-VN")}</span>
       ${status}
       ${t.warn ? `<p class="note">⚠ ${esc(t.warn)}</p>` : ""}
-      ${t.output && !busy ? `<label class="lbl">Caption TikTok <button class="mini" data-a="copy">Copy</button></label>
+      ${t.output && !busy ? `<label class="lbl">Caption TikTok <button class="mini" data-a="copy">Copy</button>
+        <button class="mini" data-a="regen">✨ Viết lại</button></label>
       <textarea data-f="caption">${esc(t.caption || "")}</textarea>
       <div class="offset"><span class="hint">Lệch lời (giây, + = chữ hiện muộn hơn):</span>
         <input type="number" step="0.1" min="-10" max="10" value="${t.offset || 0}" data-f="offset">
         <button class="mini" data-a="offset">Áp dụng</button></div>` : ""}
       <div class="row">
         ${t.output && !busy ? `<a class="link primary" href="${base}output.mp4?download=1">⬇ Tải video</a>
+          <button class="mini" data-a="post">📤 Đăng</button>
           <a class="link" href="https://www.tiktok.com/tiktokstudio/upload" target="_blank" rel="noopener">TikTok Studio ↗</a>` : ""}
         ${busy ? `<button class="mini" data-a="cancel">Huỷ</button>` : `<button class="mini" data-a="build">${t.output ? "🔁 Dựng lại" : "🎬 Dựng"}</button>
           <button class="mini danger" data-a="del">Xoá</button>`}
@@ -1154,13 +1268,19 @@ function renderTT(el, t) {
     </div>`;
   const act = {
     copy: (b) => copyText(el.querySelector("[data-f=caption]").value, b),
+    regen: async () => {
+      const r = await api(`/api/caption?kind=tt&ref=${t.id}&seed=${Math.floor(Math.random() * 1e9)}`);
+      el.querySelector("[data-f=caption]").value = r.caption;
+      await api(`/api/tiktok/${t.id}`, json("PUT", { caption: r.caption }));
+    },
+    post: () => openPost(el.querySelector(".info"), "tt", t.id, el.querySelector("[data-f=caption]")?.value || t.caption),
     offset: () => api(`/api/tiktok/${t.id}`, json("PUT", { offset: +el.querySelector("[data-f=offset]").value })),
     build: () => api(`/api/tiktok/${t.id}/build`, { method: "POST" }),
     cancel: () => api(`/api/tiktok/${t.id}/cancel`, { method: "POST" }),
     del: () => confirm("Xoá video này?") && api(`/api/tiktok/${t.id}`, { method: "DELETE" }),
   };
   el.querySelectorAll("[data-a]").forEach((b) => b.onclick = async () => {
-    try { await act[b.dataset.a](b); if (b.dataset.a !== "copy") loadTikTok(); } catch (e) { alert(e.message); }
+    try { await act[b.dataset.a](b); if (!["copy", "post", "regen"].includes(b.dataset.a)) loadTikTok(); } catch (e) { alert(e.message); }
   });
   const cap = el.querySelector("[data-f=caption]");
   if (cap) cap.onchange = () => api(`/api/tiktok/${t.id}`, json("PUT", { caption: cap.value })).catch((e) => alert(e.message));
@@ -1179,12 +1299,340 @@ $("#tMake").onclick = async () => {
   $("#tMake").disabled = false;
 };
 
+// ---------- 🎶 MV lời bài hát ảnh AI ----------
+let mvPoll = null;
+const MV_KIND = { singer: "Ca sĩ", stage: "Sân khấu", audience: "Khán giả", story: "Minh hoạ lời" };
+
+async function showMV() {
+  V = null; M = null;
+  showPage("mvPage", "mv", "MV ảnh AI");
+  loadMvKey();
+  await loadMV();
+}
+
+async function loadMvKey() {
+  const k = await api("/api/mv-key").catch(() => null);
+  if (k) $("#mKeyState").textContent = k.has ? "· đã có key ✓" : "· đang dùng gói miễn phí";
+}
+
+async function loadMV() {
+  clearTimeout(mvPoll);
+  if (!location.hash.startsWith("#/mv")) return;
+  const list = await api("/api/mv").catch(() => null);
+  if (!list) return;
+  const box = $("#mList");
+  if (!list.length) box.innerHTML = `<p class="hint">Chưa có MV nào.</p>`;
+  const ids = list.map((t) => t.id);
+  [...box.querySelectorAll(".mv")].forEach((el) => { if (!ids.includes(el.dataset.id)) el.remove(); });
+  if (list.length) box.querySelector("p.hint")?.remove();
+  list.forEach((t, i) => {
+    let el = box.querySelector(`.mv[data-id="${t.id}"]`);
+    const key = JSON.stringify([t.stamp, t.job?.done, t.job?.error, t.job?.stage, Math.round((t.job?.progress || 0) * 100),
+      t.warn, t.title, t.dirty, t.img_v, t.drawn?.length, (t.images || []).length]);
+    if (el && el.dataset.key === key) return;
+    const fresh = !el;
+    if (fresh) { el = document.createElement("div"); el.className = "mv"; el.dataset.id = t.id; }
+    el.dataset.key = key;
+    const open = [...el.querySelectorAll("details[data-d]")].filter((d) => d.open).map((d) => d.dataset.d);
+    renderMV(el, t);
+    open.forEach((d) => { const x = el.querySelector(`details[data-d="${d}"]`); if (x) x.open = true; });
+    if (fresh) box.insertBefore(el, box.children[i] || null);
+  });
+  if (list.some((t) => t.job && !t.job.done)) mvPoll = setTimeout(loadMV, 2000);
+}
+
+function renderMV(el, t) {
+  const busy = t.job && !t.job.done, pct = Math.round((t.job?.progress || 0) * 100), base = `/api/mv/${t.id}/files/`;
+  const has = (x) => (t.outputs || []).includes(x) && !busy;
+  const fmts = { hv: "ngang + dọc", h: "ngang 16:9", v: "dọc 9:16" }[t.formats];
+  const status = busy ? `<p class="note">${esc(t.job.stage || "Đang chuẩn bị")}… ${pct}%</p><div class="progress"><div style="width:${pct}%"></div></div>`
+    : t.job?.error ? `<p class="note bad">Lỗi: ${esc(t.job.error)}</p>` : "";
+  const v = (i) => t.img_v?.[i] || t.stamp || "0";
+  const imgs = (t.images || []).map((im, i) => `<div class="mvImg">
+      ${t.drawn.includes(i) ? `<img loading="lazy" src="${base}img_${String(i).padStart(2, "0")}.jpg?v=${v(i)}" alt="">` : `<div class="ph">${busy ? "Đang vẽ…" : "Chưa vẽ"}</div>`}
+      <span class="hint"><b>${i + 1}. ${MV_KIND[im.kind] || im.kind}</b>${im.line ? ` · ${esc(im.line)}` : ""}</span>
+      ${busy ? "" : `<div class="row"><button class="mini" data-a="redraw" data-i="${i}">🎨 Vẽ lại</button>
+        <button class="mini" data-a="prompt" data-i="${i}">✏ Tả cảnh</button>
+        <label class="mini btnFile">⬆ Ảnh của tôi<input type="file" accept="image/*" hidden data-up="${i}"></label></div>`}
+    </div>`).join("");
+  const lines = t.lang && t.lang !== "vi" ? (t.lines || []) : [];
+  el.innerHTML = `<div class="mvHead"><b>${esc(t.title)}</b>
+      <span class="hint">${t.length ? `${t.length} giây` : "cả bài"}${t.duration ? ` (${fmt(t.duration)})` : ""} · ${fmts} · ca sĩ ${t.singer === "m" ? "nam" : "nữ"} · ${new Date(t.created * 1000).toLocaleString("vi-VN")}</span>
+      ${status}
+      ${t.warn ? `<p class="note">⚠ ${esc(t.warn)}</p>` : ""}
+      ${t.dirty && !busy ? `<p class="note">Bạn đã đổi ảnh / lời dịch: bấm <b>🔁 Dựng lại</b> để video cập nhật.</p>` : ""}</div>
+    <div class="mvVids">
+      ${has("h") ? `<video controls playsinline preload="metadata" class="vh" src="${base}h.mp4?v=${t.stamp}"></video>` : ""}
+      ${has("v") ? `<video controls playsinline preload="metadata" class="vv" src="${base}v.mp4?v=${t.stamp}"></video>` : ""}
+      ${!has("h") && !has("v") ? `<div class="ph">${busy ? "Đang làm…" : "Chưa có video"}</div>` : ""}
+    </div>
+    <div class="row">
+      ${has("h") ? `<a class="link primary" href="${base}h.mp4?download=1">⬇ Bản ngang</a>` : ""}
+      ${has("v") ? `<a class="link primary" href="${base}v.mp4?download=1">⬇ Bản dọc</a>` : ""}
+      ${(has("h") || has("v")) ? `<a class="link" href="${base}thumb.jpg?download=1">⬇ Ảnh bìa</a>
+        <button class="mini" data-a="post">📤 Đăng</button>` : ""}
+      ${busy ? `<button class="mini" data-a="cancel">Huỷ</button>` : `<button class="mini" data-a="build">${t.outputs?.length ? "🔁 Dựng lại" : "🎬 Dựng"}</button>
+        <button class="mini danger" data-a="del">Xoá</button>`}
+    </div>
+    <div class="postHost"></div>
+    ${t.yt_title && !busy ? `<details data-d="yt"><summary>▶ Tiêu đề, mô tả, ảnh bìa cho YouTube</summary>
+      <img class="mvThumb" src="${base}thumb.jpg?v=${t.stamp}" alt="">
+      <label class="lbl">Tiêu đề <button class="mini" data-a="copyT">Copy</button></label>
+      <input data-f="ytt" value="${esc(t.yt_title)}">
+      <label class="lbl">Mô tả <button class="mini" data-a="copyD">Copy</button></label>
+      <textarea data-f="ytd" rows="6">${esc(t.yt_desc)}</textarea></details>` : ""}
+    ${t.caption && !busy ? `<label class="lbl">Caption TikTok / Facebook <button class="mini" data-a="copy">Copy</button>
+      <button class="mini" data-a="regen">✨ Viết lại</button></label>
+      <textarea data-f="caption">${esc(t.caption)}</textarea>` : ""}
+    ${lines.length ? `<details data-d="vi"><summary>🇻🇳 Lời dịch (${lines.length} câu) — sửa cho hay rồi bấm Lưu</summary>
+      <div class="mvLines">${lines.map((x, i) => `<div><span>${esc(x)}</span><input data-vi="${i}" value="${esc(t.vi?.[x] || "")}"></div>`).join("")}</div>
+      ${busy ? "" : `<div class="row"><button class="mini primary" data-a="saveVi">💾 Lưu lời dịch</button></div>`}</details>` : ""}
+    ${imgs ? `<details data-d="img"><summary>🖼 Ảnh trong MV (${t.drawn.length}/${t.images.length})</summary><div class="mvGrid">${imgs}</div></details>` : ""}`;
+  const cap = el.querySelector("[data-f=caption]");
+  const act = {
+    copy: (b) => copyText(cap.value, b),
+    copyT: (b) => copyText(el.querySelector("[data-f=ytt]").value, b),
+    copyD: (b) => copyText(el.querySelector("[data-f=ytd]").value, b),
+    regen: async () => {
+      const r = await api(`/api/caption?kind=mv&ref=${t.id}&seed=${Math.floor(Math.random() * 1e9)}`);
+      cap.value = r.caption;
+      await api(`/api/mv/${t.id}`, json("PUT", { caption: r.caption }));
+    },
+    post: () => openPost(el.querySelector(".postHost"), "mv", t.id, cap?.value || t.caption || ""),
+    saveVi: () => {
+      const vi = {};
+      el.querySelectorAll("[data-vi]").forEach((x) => { vi[lines[+x.dataset.vi]] = x.value; });
+      return api(`/api/mv/${t.id}`, json("PUT", { vi }));
+    },
+    redraw: (b) => api(`/api/mv/${t.id}/images/${b.dataset.i}/redraw`, json("POST", {})),
+    prompt: (b) => {
+      const im = t.images[+b.dataset.i];
+      const p = window.prompt("Tả cảnh muốn vẽ (nên viết tiếng Anh, vd: a girl standing in the rain at night, city lights):", im.prompt || "");
+      return p && p.trim() ? api(`/api/mv/${t.id}/images/${b.dataset.i}/redraw`, json("POST", { prompt: p })) : null;
+    },
+    build: () => api(`/api/mv/${t.id}/build`, { method: "POST" }),
+    cancel: () => api(`/api/mv/${t.id}/cancel`, { method: "POST" }),
+    del: () => confirm("Xoá MV này?") && api(`/api/mv/${t.id}`, { method: "DELETE" }),
+  };
+  el.querySelectorAll("[data-a]").forEach((b) => b.onclick = async () => {
+    try { await act[b.dataset.a](b); if (!["copy", "copyT", "copyD", "post", "regen"].includes(b.dataset.a)) loadMV(); } catch (e) { alert(e.message); }
+  });
+  el.querySelectorAll("[data-up]").forEach((inp) => inp.onchange = async () => {
+    if (!inp.files[0]) return;
+    const fd = new FormData(); fd.append("file", inp.files[0]);
+    try { await api(`/api/mv/${t.id}/images/${inp.dataset.up}`, { method: "POST", body: fd }); loadMV(); } catch (e) { alert(e.message); }
+  });
+  if (cap) cap.onchange = () => api(`/api/mv/${t.id}`, json("PUT", { caption: cap.value })).catch((e) => alert(e.message));
+}
+
+$("#mMake").onclick = async () => {
+  $("#mErr").textContent = "";
+  const song = $("#mSong").value.trim();
+  if (!song) { $("#mErr").textContent = "Nhập tên bài hát hoặc link YouTube"; return; }
+  $("#mMake").disabled = true;
+  try {
+    await api("/api/mv", json("POST", { song, length: +$("#mLen").value, formats: $("#mFmt").value, singer: $("#mSinger").value }));
+    $("#mSong").value = "";
+    await loadMV();
+  } catch (e) { $("#mErr").textContent = e.message; }
+  $("#mMake").disabled = false;
+};
+$("#mKeySave").onclick = async () => {
+  try { await api("/api/mv-key", json("PUT", { key: $("#mKey").value })); $("#mKey").value = ""; loadMvKey(); }
+  catch (e) { alert(e.message); }
+};
+$("#mKeyDel").onclick = async () => { await api("/api/mv-key", { method: "DELETE" }); loadMvKey(); };
+
+// ---------- 🎬 ghép phim + lồng tiếng ----------
+let dPoll = null;
+
+async function showDub() {
+  V = null; M = null;
+  showPage("dubPage", "dub", "Ghép phim lồng tiếng");
+  loadDouyinCookie();
+  await loadDub();
+}
+
+async function loadDouyinCookie(c) {
+  c = c || await api("/api/dub-cookies").catch(() => null);
+  if (!c) return;
+  $("#dCkState").textContent = c.has ? `· đã có (cập nhật ${new Date(c.updated * 1000).toLocaleString("vi-VN")})` : "· chưa có";
+  $("#dCkDel").classList.toggle("hidden", !c.has);
+}
+
+$("#dCkFile").onchange = async () => {
+  const f = $("#dCkFile").files[0];
+  if (!f) return;
+  const fd = new FormData();
+  fd.append("file", f);
+  try { loadDouyinCookie(await api("/api/dub-cookies", { method: "POST", body: fd })); alert("Đã lưu cookie Douyin"); }
+  catch (e) { alert(e.message); }
+  $("#dCkFile").value = "";
+};
+$("#dCkDel").onclick = async () => {
+  if (confirm("Xoá cookie Douyin?")) loadDouyinCookie(await api("/api/dub-cookies", { method: "DELETE" }));
+};
+
+async function loadDub() {
+  clearTimeout(dPoll);
+  if (!location.hash.startsWith("#/dub")) return;
+  const list = await api("/api/dub").catch(() => null);
+  if (!list) return;
+  const box = $("#dList");
+  if (!list.length) box.innerHTML = `<p class="hint">Chưa có phim nào.</p>`;
+  const ids = list.map((d) => d.id);
+  [...box.querySelectorAll(".dub")].forEach((el) => { if (!ids.includes(el.dataset.id)) el.remove(); });
+  if (list.length) box.querySelector("p.hint")?.remove();
+  list.forEach((d, i) => {
+    let el = box.querySelector(`.dub[data-id="${d.id}"]`);
+    const key = JSON.stringify([d.stamp, d.job?.done, d.job?.error, d.job?.stage, Math.round((d.job?.progress || 0) * 100),
+      d.clips.length, Object.keys(d.segs).length, d.warn, d.scanned]);
+    if (el && el.dataset.key === key) return;
+    const fresh = !el;
+    if (fresh) { el = document.createElement("div"); el.className = "dub"; el.dataset.id = d.id; }
+    el.dataset.key = key;
+    renderDub(el, d);
+    if (fresh) box.insertBefore(el, box.children[i] || null);
+  });
+  if (list.some((d) => d.job && !d.job.done)) dPoll = setTimeout(loadDub, 1500);
+}
+
+function renderDub(el, d) {
+  const busy = d.job && !d.job.done, pct = Math.round((d.job?.progress || 0) * 100), o = d.opts;
+  const status = busy ? `<p class="note">${esc(d.job.stage || "Đang chuẩn bị")}… ${pct}%</p><div class="progress"><div style="width:${pct}%"></div></div>`
+    : d.job?.error ? `<p class="note bad">Lỗi: ${esc(d.job.error)}</p>` : "";
+  const on = d.clips.filter((c) => c.on), total = on.reduce((s, c) => s + (c.duration || 0), 0);
+  const rv = d.review || {};
+  const flagText = (f) => f.startsWith("dup:") ? `Trùng nội dung với video ${d.clips.findIndex((x) => x.key === f.slice(4)) + 1}`
+    : f === "silent" ? "Không có thoại" : f === "short" ? "Rất ngắn" : f;
+  const rows = d.clips.map((c, i) => {
+    const sg = d.segs[c.key]?.items || [], r = rv[c.key];
+    const badges = [r?.ep ? `<span class="badge">Tập ${r.ep}</span>` : "",
+      ...(r?.flags || []).map((f) => `<span class="badge warnB">${esc(flagText(f))}</span>`),
+      c.error ? `<span class="badge warnB">Lỗi tải</span>` : ""].join("");
+    return `<div class="clipRow ${c.on ? "" : "off"}" data-k="${esc(c.key)}">
+      <input type="checkbox" data-f="on" ${c.on ? "checked" : ""} ${busy ? "disabled" : ""}>
+      <span class="n hint">${i + 1}</span>
+      <span class="t">${r ? `<img class="thumb" loading="lazy" src="/api/dub/${d.id}/thumb/${esc(c.key)}.jpg" alt="" data-play title="Xem video">` : ""}
+        <span class="tt2"><b title="${esc(c.title || c.url)}">${esc(c.title || c.url || c.key)}</b>${badges ? `<span>${badges}</span>` : ""}
+        ${r?.preview ? `<span class="hint pv">“${esc(r.preview)}”</span>` : c.error ? `<span class="hint pv bad">${esc(c.error)}</span>` : ""}</span></span>
+      <span class="d hint">${c.duration ? fmt(c.duration) : ""}</span>
+      <span>${busy ? "" : `<button class="mini" data-m="-1" title="Lên">↑</button><button class="mini" data-m="1" title="Xuống">↓</button>`}</span>
+      ${(r || sg.length) && !busy ? `<details><summary class="hint">Xem video & thoại${sg.length ? ` (${sg.length} câu, sửa được bản dịch)` : ""}</summary>
+        <div class="pvBox"><video controls playsinline preload="none" data-src="/api/dub/${d.id}/src/${esc(c.key)}"></video>
+        <div class="segs">${sg.length ? sg.map((g) => `<div class="seg"><span class="hint">${fmt(g.s)}</span><span class="src">${esc(g.src)}</span>
+          <input data-tr value="${esc(g.tr || "")}"></div>`).join("") : `<p class="hint">Không nghe thấy thoại.</p>`}</div></div></details>` : ""}
+    </div>`;
+  }).join("");
+  const scanned = d.scanned, nRev = Object.keys(rv).length;
+  el.innerHTML = `<div class="head"><input data-f="title" value="${esc(d.title)}" ${busy ? "disabled" : ""}>
+      <span class="hint">${new Date(d.created * 1000).toLocaleString("vi-VN")}</span></div>
+    ${status}
+    ${d.warn ? `<p class="note">⚠ ${esc(d.warn)}</p>` : ""}
+    ${d.output && !busy ? `<video controls playsinline preload="metadata" src="/api/dub/${d.id}/files/output.mp4?v=${d.stamp}"></video>
+      <div class="row"><a class="link primary" href="/api/dub/${d.id}/files/output.mp4?download=1">⬇ Tải phim (${fmt(d.duration || 0)})</a>
+        <button class="mini" data-a="post">📤 Đăng</button></div><div class="postHost"></div>` : ""}
+    ${d.clips.length ? `<span class="hint">${on.length}/${d.clips.length} video được chọn${total ? ` · khoảng ${fmt(total)}` : ""}.
+      ${scanned ? `App đã xem ${nRev} video: xếp theo số tập (không có thì theo ngày đăng), bỏ tích video trùng. Mở “Xem video & thoại” để xem từng video, bỏ tích video không dùng, xếp lại bằng ↑ ↓ rồi bấm Ghép.`
+        : "Bấm “Xem nội dung” để app tải và nghe hết các video trước, bạn xem lại rồi mới ghép."}</span><div class="clipRows">${rows}</div>` : busy ? "" : `<p class="hint">Chưa có video nào, bấm “Tải file lên”.</p>`}
+    ${busy ? "" : `<div class="opts">
+      <label class="check"><input type="checkbox" data-o="dub" ${o.dub ? "checked" : ""}> Lồng tiếng Việt</label>
+      <label class="check"><input type="checkbox" data-o="subs" ${o.subs ? "checked" : ""}> Phụ đề tiếng Việt</label>
+      <label class="check">Giọng <select data-o="voice"><option value="female" ${o.voice === "female" ? "selected" : ""}>Nữ (Hoài My)</option>
+        <option value="male" ${o.voice === "male" ? "selected" : ""}>Nam (Nam Minh)</option></select></label>
+      <label class="check">Tiếng gốc <select data-o="orig"><option value="duck" ${o.orig === "duck" ? "selected" : ""}>Nhỏ lại khi có lời lồng</option>
+        <option value="mute" ${o.orig === "mute" ? "selected" : ""}>Tắt hẳn</option></select></label></div>`}
+    <div class="row">
+      ${busy ? `<button class="mini" data-a="cancel">Huỷ</button>` : `${d.clips.length && !scanned ? `<button class="primary" data-a="scan">🔍 Xem nội dung</button>` : ""}
+        ${d.clips.length && scanned ? `<button class="primary" data-a="build">${d.output ? "🔁 Dựng lại" : "🎬 Ghép & lồng tiếng"}</button>
+          <button class="mini" data-a="scan" title="Xem lại các video mới thêm">🔍 Xem lại</button>` : ""}
+        <label class="mini btnFile">📤 Tải file lên<input type="file" accept="video/*" multiple hidden data-f="files"></label>
+        <button class="mini danger" data-a="del">Xoá</button>`}
+    </div>`;
+  const collect = () => {
+    const segs = {};
+    el.querySelectorAll(".clipRow").forEach((r) => {
+      const ins = [...r.querySelectorAll("[data-tr]")];
+      if (ins.length) segs[r.dataset.k] = ins.map((x) => x.value);
+    });
+    const opts = {};
+    el.querySelectorAll("[data-o]").forEach((x) => opts[x.dataset.o] = x.type === "checkbox" ? x.checked : x.value);
+    return {
+      title: el.querySelector("[data-f=title]").value,
+      order: [...el.querySelectorAll(".clipRow")].map((r) => r.dataset.k),
+      on: Object.fromEntries([...el.querySelectorAll(".clipRow")].map((r) => [r.dataset.k, r.querySelector("[data-f=on]").checked])),
+      opts, segs,
+    };
+  };
+  const act = {
+    build: async () => { await api(`/api/dub/${d.id}`, json("PUT", collect())); await api(`/api/dub/${d.id}/build`, { method: "POST" }); },
+    post: () => openPost(el.querySelector(".postHost"), "dub", d.id, d.caption || ""),
+    scan: async () => { await api(`/api/dub/${d.id}`, json("PUT", collect())); await api(`/api/dub/${d.id}/scan`, { method: "POST" }); },
+    cancel: () => api(`/api/dub/${d.id}/cancel`, { method: "POST" }),
+    del: () => confirm("Xoá phim này cùng các video đã tải?") && api(`/api/dub/${d.id}`, { method: "DELETE" }),
+  };
+  el.querySelectorAll("[data-a]").forEach((b) => b.onclick = async () => {
+    b.disabled = true;
+    try {
+      await act[b.dataset.a]();
+      if (b.dataset.a !== "post") { el.dataset.key = ""; loadDub(); }
+    } catch (e) { alert(e.message); }
+    b.disabled = false;
+  });
+  el.querySelectorAll("[data-m]").forEach((b) => b.onclick = () => {
+    const r = b.closest(".clipRow"), sib = +b.dataset.m < 0 ? r.previousElementSibling : r.nextElementSibling;
+    if (sib) +b.dataset.m < 0 ? sib.before(r) : sib.after(r);
+    el.querySelectorAll(".clipRow .n").forEach((n, i) => n.textContent = i + 1);
+  });
+  el.querySelectorAll("[data-f=on]").forEach((x) => x.onchange = () => x.closest(".clipRow").classList.toggle("off", !x.checked));
+  // video xem trước chỉ tải khi mở ra; bấm ảnh thì mở và phát luôn
+  el.querySelectorAll(".clipRow details").forEach((dt) => dt.ontoggle = () => {
+    const v = dt.querySelector("video");
+    if (dt.open && !v.src) v.src = v.dataset.src;
+    if (!dt.open) v.pause();
+  });
+  el.querySelectorAll("[data-play]").forEach((img) => img.onclick = () => {
+    const dt = img.closest(".clipRow").querySelector("details");
+    if (!dt) return;
+    dt.open = true;
+    const v = dt.querySelector("video");
+    if (!v.src) v.src = v.dataset.src;
+    v.play().catch(() => {});
+  });
+  const fi = el.querySelector("[data-f=files]");
+  if (fi) fi.onchange = async () => {
+    if (!fi.files.length) return;
+    const fd = new FormData();
+    [...fi.files].forEach((f) => fd.append("files", f));
+    try {
+      await api(`/api/dub/${d.id}`, json("PUT", collect()));
+      await api(`/api/dub/${d.id}/upload`, { method: "POST", body: fd });
+      await api(`/api/dub/${d.id}/scan`, { method: "POST" });
+      el.dataset.key = ""; loadDub();
+    } catch (e) { alert(e.message); }
+  };
+}
+
+$("#dMake").onclick = async () => {
+  $("#dErr").textContent = "";
+  if (!$("#dOwner").checked) { $("#dErr").textContent = "Tích ô xác nhận đây là kênh của bạn hoặc đã được phép"; return; }
+  $("#dMake").disabled = true;
+  try {
+    await api("/api/dub", json("POST", { source: $("#dSrc").value, owner: true }));
+    $("#dSrc").value = "";
+    await loadDub();
+  } catch (e) { $("#dErr").textContent = e.message; }
+  $("#dMake").disabled = false;
+};
+
 function route() {
   const h = location.hash, m = h.match(/^#\/p\/(\w+)/), mx = h.match(/^#\/m\/(\w+)/);
   if (m) showEditor(m[1]).catch((e) => { alert(e.message); location.hash = ""; });
   else if (mx) showMix(mx[1]).catch((e) => { alert(e.message); location.hash = "#/music"; });
   else if (h.startsWith("#/music")) showMusic();
   else if (h.startsWith("#/tiktok")) showTikTok();
+  else if (h.startsWith("#/mv")) showMV();
+  else if (h.startsWith("#/dub")) showDub();
   else if (h.startsWith("#/trends")) showTrends();
   else if (h.startsWith("#/shorts")) showShorts();
   else if (h.startsWith("#/channels")) showChannels();
