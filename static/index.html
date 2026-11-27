@@ -397,8 +397,9 @@
   <section class="card narrow">
     <h2>🎶 MV lời bài hát ảnh AI</h2>
     <p class="hint">Nhập tên bài, app tìm lời có mốc thời gian và bản thu âm khớp lời, <b>dịch lời sang tiếng Việt</b>
-      (bài nước ngoài), rồi nhờ AI <b>vẽ ảnh</b>: ca sĩ trên sân khấu, khán giả, cảnh minh hoạ theo từng câu hát.
-      Ảnh chuyển động nhẹ, đổi cảnh đúng lúc sang câu mới, lời gốc chạy màu theo tiếng hát, lời Việt bên dưới.
+      (bài nước ngoài), rồi nhờ AI <b>vẽ ảnh</b> theo chủ đề bạn chọn (chuyện tình, phong cảnh, anime, cổ trang…), mỗi ảnh minh hoạ
+      một câu hát khác nhau, hoặc vẽ theo <b>kịch bản bạn tự viết</b>.
+      Ảnh chuyển động nhẹ, hoà dần sang cảnh mới đúng lúc vào câu hát, lời gốc chạy màu theo tiếng hát, lời Việt bên dưới.
       Ra bản <b>ngang 16:9</b> cho YouTube và bản <b>dọc 9:16</b> cho TikTok / Reels, kèm ảnh bìa, tiêu đề, mô tả và caption.</p>
     <label class="lbl">Bài hát</label>
     <input id="mSong" placeholder="Ca sĩ - Tên bài, bài Trung ghi tên tiếng Trung (vd: 欧阳耀莹 - 戒不掉), hoặc link YouTube">
@@ -409,8 +410,22 @@
       <div><span class="hint">Khung hình</span>
         <select id="mFmt"><option value="hv" selected>Ngang + dọc</option><option value="h">Ngang 16:9 (YouTube)</option>
           <option value="v">Dọc 9:16 (TikTok)</option></select></div>
-      <div><span class="hint">Ca sĩ trong ảnh</span>
+      <div><span class="hint">Chủ đề ảnh</span>
+        <select id="mTheme"><option value="love" selected>Chuyện tình theo lời bài hát</option>
+          <option value="scenery">Phong cảnh (không người)</option><option value="anime">Anime</option>
+          <option value="ancient">Cổ trang</option><option value="city">Thành phố đêm mưa</option>
+          <option value="stage">Ca sĩ trên sân khấu</option><option value="script">✍ Tự viết kịch bản</option></select></div>
+      <div id="mSingerBox" class="hidden"><span class="hint">Ca sĩ trong ảnh</span>
         <select id="mSinger"><option value="f">Nữ</option><option value="m">Nam</option></select></div>
+      <div><span class="hint">Số ảnh AI (gói miễn phí ~45 giây/ảnh)</span>
+        <select id="mImg"><option value="8">8 ảnh (~6 phút)</option><option value="12" selected>12 ảnh (~9 phút)</option>
+          <option value="16">16 ảnh (~12 phút)</option><option value="24">24 ảnh (~18 phút)</option></select></div>
+    </div>
+    <div id="mScriptBox" class="hidden">
+      <label class="lbl">Kịch bản: mỗi dòng một cảnh (viết tiếng Việt được, tối đa 24 cảnh)</label>
+      <textarea id="mScript" rows="6" placeholder="Cô gái đứng một mình dưới mưa trước cửa quán cà phê&#10;Hai người đi chung một chiếc ô trên phố đêm&#10;Bức ảnh cũ của hai người trên bàn gỗ&#10;Chàng trai nhìn theo chuyến tàu rời ga lúc hoàng hôn"></textarea>
+      <p class="hint">Các cảnh hiện theo thứ tự từ đầu đến cuối bài; ít dòng hơn số cảnh thì lặp lại từ đầu.
+        Tả rõ người, nơi chốn, thời tiết, ánh sáng sẽ ra ảnh đẹp hơn.</p>
     </div>
     <div class="row mt"><button id="mMake" class="primary big">🎨 Làm MV</button></div>
     <p class="err" id="mErr"></p>

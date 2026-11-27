@@ -1301,7 +1301,9 @@ $("#tMake").onclick = async () => {
 
 // ---------- 🎶 MV lời bài hát ảnh AI ----------
 let mvPoll = null;
-const MV_KIND = { singer: "Ca sĩ", stage: "Sân khấu", audience: "Khán giả", story: "Minh hoạ lời" };
+const MV_KIND = { singer: "Ca sĩ", stage: "Sân khấu", audience: "Khán giả", story: "Minh hoạ lời", script: "Kịch bản" };
+const MV_THEME = { love: "Chuyện tình theo lời bài hát", scenery: "Phong cảnh (không người)", anime: "Anime",
+  ancient: "Cổ trang", city: "Thành phố đêm mưa", stage: "Ca sĩ trên sân khấu", script: "✍ Tự viết kịch bản" };
 
 async function showMV() {
   V = null; M = null;
@@ -1357,7 +1359,7 @@ function renderMV(el, t) {
     </div>`).join("");
   const lines = t.lang && t.lang !== "vi" ? (t.lines || []) : [];
   el.innerHTML = `<div class="mvHead"><b>${esc(t.title)}</b>
-      <span class="hint">${t.length ? `${t.length} giây` : "cả bài"}${t.duration ? ` (${fmt(t.duration)})` : ""} · ${fmts} · ca sĩ ${t.singer === "m" ? "nam" : "nữ"} · ${new Date(t.created * 1000).toLocaleString("vi-VN")}</span>
+      <span class="hint">${t.length ? `${t.length} giây` : "cả bài"}${t.duration ? ` (${fmt(t.duration)})` : ""} · ${fmts} · ${esc(MV_THEME[t.theme || "stage"])} · ${new Date(t.created * 1000).toLocaleString("vi-VN")}</span>
       ${status}
       ${t.warn ? `<p class="note">⚠ ${esc(t.warn)}</p>` : ""}
       ${t.dirty && !busy ? `<p class="note">Bạn đã đổi ảnh / lời dịch: bấm <b>🔁 Dựng lại</b> để video cập nhật.</p>` : ""}</div>
@@ -1387,6 +1389,11 @@ function renderMV(el, t) {
     ${lines.length ? `<details data-d="vi"><summary>🇻🇳 Lời dịch (${lines.length} câu) — sửa cho hay rồi bấm Lưu</summary>
       <div class="mvLines">${lines.map((x, i) => `<div><span>${esc(x)}</span><input data-vi="${i}" value="${esc(t.vi?.[x] || "")}"></div>`).join("")}</div>
       ${busy ? "" : `<div class="row"><button class="mini primary" data-a="saveVi">💾 Lưu lời dịch</button></div>`}</details>` : ""}
+    ${busy ? "" : `<details data-d="theme"><summary>🎨 Đổi chủ đề ảnh / kịch bản</summary>
+      <p class="hint">Đổi chủ đề thì app lên cảnh và vẽ lại cả bộ ảnh (gói miễn phí ~45 giây/ảnh).</p>
+      <select data-f="theme">${Object.entries(MV_THEME).map(([k, v]) => `<option value="${k}" ${k === (t.theme || "stage") ? "selected" : ""}>${v}</option>`).join("")}</select>
+      <textarea data-f="script" rows="5" placeholder="Mỗi dòng một cảnh (chỉ dùng khi chọn Tự viết kịch bản)">${esc((t.script || []).join("\n"))}</textarea>
+      <div class="row"><button class="mini primary" data-a="theme">Lưu & vẽ lại ảnh</button></div></details>`}
     ${imgs ? `<details data-d="img"><summary>🖼 Ảnh trong MV (${t.drawn.length}/${t.images.length})</summary><div class="mvGrid">${imgs}</div></details>` : ""}`;
   const cap = el.querySelector("[data-f=caption]");
   const act = {
@@ -1410,6 +1417,12 @@ function renderMV(el, t) {
       const p = window.prompt("Tả cảnh muốn vẽ (nên viết tiếng Anh, vd: a girl standing in the rain at night, city lights):", im.prompt || "");
       return p && p.trim() ? api(`/api/mv/${t.id}/images/${b.dataset.i}/redraw`, json("POST", { prompt: p })) : null;
     },
+    theme: async () => {
+      const theme = el.querySelector("[data-f=theme]").value, script = el.querySelector("[data-f=script]").value;
+      if (!confirm("Lên cảnh và vẽ lại toàn bộ ảnh theo chủ đề mới?")) return;
+      await api(`/api/mv/${t.id}`, json("PUT", { theme, script }));
+      await api(`/api/mv/${t.id}/build`, { method: "POST" });
+    },
     build: () => api(`/api/mv/${t.id}/build`, { method: "POST" }),
     cancel: () => api(`/api/mv/${t.id}/cancel`, { method: "POST" }),
     del: () => confirm("Xoá MV này?") && api(`/api/mv/${t.id}`, { method: "DELETE" }),
@@ -1431,11 +1444,16 @@ $("#mMake").onclick = async () => {
   if (!song) { $("#mErr").textContent = "Nhập tên bài hát hoặc link YouTube"; return; }
   $("#mMake").disabled = true;
   try {
-    await api("/api/mv", json("POST", { song, length: +$("#mLen").value, formats: $("#mFmt").value, singer: $("#mSinger").value }));
+    await api("/api/mv", json("POST", { song, length: +$("#mLen").value, formats: $("#mFmt").value, singer: $("#mSinger").value, images: +$("#mImg").value,
+      theme: $("#mTheme").value, script: $("#mScript").value }));
     $("#mSong").value = "";
     await loadMV();
   } catch (e) { $("#mErr").textContent = e.message; }
   $("#mMake").disabled = false;
+};
+$("#mTheme").onchange = () => {
+  $("#mSingerBox").classList.toggle("hidden", $("#mTheme").value !== "stage");
+  $("#mScriptBox").classList.toggle("hidden", $("#mTheme").value !== "script");
 };
 $("#mKeySave").onclick = async () => {
   try { await api("/api/mv-key", json("PUT", { key: $("#mKey").value })); $("#mKey").value = ""; loadMvKey(); }

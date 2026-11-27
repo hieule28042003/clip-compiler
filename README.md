@@ -143,16 +143,21 @@ App làm video dọc 1080x1920:
 
 ## 🎶 MV lời bài hát ảnh AI (`clipmaker/mv.py`)
 
-Nhập “Ca sĩ - Tên bài” (hoặc link YouTube), chọn cả bài / 1 phút / 30 giây, khung ngang + dọc, ca sĩ nữ / nam:
+Nhập “Ca sĩ - Tên bài” (hoặc link YouTube), chọn cả bài / 1 phút / 30 giây, khung ngang + dọc, chủ đề ảnh
+(chuyện tình theo lời bài, phong cảnh không người, anime, cổ trang, thành phố đêm mưa, ca sĩ trên sân khấu) hoặc
+**tự viết kịch bản** (mỗi dòng một cảnh, viết tiếng Việt được: app dịch sang tiếng Anh cho AI vẽ, cảnh hiện theo thứ tự):
 
 1. Lời có mốc thời gian + bản thu âm khớp lời: như TikTok lời bài hát.
 2. Bài nước ngoài: dịch từng câu sang tiếng Việt (Google Dịch), sửa lại cho hay ở “🇻🇳 Lời dịch” rồi Dựng lại.
-3. Lên cảnh: đổi cảnh ở đầu câu hát (5–9 giây/cảnh), xen ca sĩ hát / toàn cảnh sân khấu / khán giả / cảnh minh hoạ câu hát
-   (câu hát dịch sang tiếng Anh làm mô tả). Tối đa 24 ảnh, bài dài thì dùng lại ảnh với chuyển động khác.
+3. Lên cảnh: đổi cảnh ở đầu câu hát (5–9 giây/cảnh). Mỗi ảnh minh hoạ một câu hát khác nhau (điệp khúc lặp lại thì
+   lấy câu chưa vẽ), mỗi ảnh một góc máy (toàn cảnh, cận, ngược sáng, từ trên cao…); câu hát dịch sang tiếng Anh làm mô tả.
+   Đổi chủ đề / kịch bản cho MV đã làm ở “🎨 Đổi chủ đề ảnh”: lên cảnh và vẽ lại cả bộ. Chọn 8 / 12 / 16 / 24 ảnh: ít ảnh vẽ nhanh hơn, các cảnh dùng lại ảnh với
+   chuyển động khác.
 4. Vẽ ảnh bằng Pollinations: không key là gói miễn phí (khoảng 45 giây một ảnh, ảnh nhỏ, có logo pollinations.ai ở góc);
    có API key (`sk_…`, lưu ở `data/ai_image.json`) thì dùng model Flux. Ảnh nào chưa ưng: 🎨 Vẽ lại, ✏ Tả cảnh (tự viết mô tả),
    hoặc ⬆ thay bằng ảnh của bạn.
-5. Dựng: ảnh zoom / lia chậm, tên bài lớn ở đầu, lời gốc chạy màu theo tiếng hát (karaoke), lời Việt bên dưới, chữ
+5. Dựng: ảnh zoom / lia chậm (phóng ảnh gấp 3 trước khi zoom cho mịn, tốc độ êm ở hai đầu), hoà sang cảnh mới
+   trong 0.8 giây (xen vài kiểu trượt nhẹ) sao cho cảnh mới hiện rõ đúng lúc vào câu hát, tên bài lớn ở đầu, lời gốc chạy màu theo tiếng hát (karaoke), lời Việt bên dưới, chữ
    “Hình ảnh minh hoạ bằng AI”. Bản dọc đặt ảnh 16:9 giữa nền mờ. Kèm ảnh bìa YouTube, tiêu đề + mô tả (có lời và lời dịch),
    caption + hashtag (#vietsub, #nhactrung…). Nút 📤 Đăng dùng bản dọc.
 

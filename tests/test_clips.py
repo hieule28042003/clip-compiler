@@ -1458,12 +1458,22 @@ def test_mv_plan_subtitles_and_texts(tmp_path):
     tl = [(2.0, 6.0, "故事的小黄花"), (6.0, 10.5, "从出生那年就飘着"), (10.5, 15.0, "童年的荡秋千"),
           (15.0, 40.0, "随记忆一直晃到现在")]
     assert mv.lang_of([x[2] for x in tl]) == "zh" and mv.lang_of(["Anh còn nợ em"]) == "vi"
-    scenes, images = mv.plan(tl, 42.0, n_max=4)
+    scenes, images = mv.plan(tl, 42.0, n_max=4, theme="stage")
     assert abs(sum(s["d"] for s in scenes) - 42.0) < 0.01
     assert all(mv.SCENE_MIN - 0.01 <= s["d"] <= mv.SCENE_MAX + 0.01 for s in scenes[:-1])
     assert len(images) == 4 and images[0]["kind"] == "stage" and {s["img"] for s in scenes} == {0, 1, 2, 3}
     assert all(any(abs(s["s"] - t0) < 0.01 for t0, _, _ in tl) or s["s"] == 0 or s["d"] <= mv.SCENE_MAX
                for s in scenes)
+    # chủ đề theo lời: mỗi ảnh một câu khác nhau (điệp khúc lặp lại không vẽ lại), góc máy khác nhau
+    rep = [(0, 6, "A"), (6, 12, "B"), (12, 18, "A"), (18, 24, "B"), (24, 30, "C"), (30, 36, "A"), (36, 60, "D")]
+    _, ims = mv.plan(rep, 60.0, n_max=4, theme="love")
+    assert all(im["kind"] == "story" for im in ims) and len({im["line"] for im in ims}) == 4
+    ps = [mv.prompt(im, "f", f"lyric number {im['line']} here", "love") for im in ims]
+    assert len({p.split(" of ")[0] for p in ps}) == 4 and all("singer" not in p for p in ps)
+    assert "no people" in mv.prompt(ims[0], "f", "a b c", "scenery") and "anime" in mv.prompt(ims[0], "f", "", "anime")
+    sc, ims = mv.plan(tl, 42.0, theme="script", script=["Cô gái dưới mưa", "Hai người chung ô"])
+    assert [im["line"] for im in ims] == ["Cô gái dưới mưa", "Hai người chung ô"] and [x["img"] for x in sc][:3] == [0, 1, 0]
+    assert mv.prompt(ims[0], "f", "a girl in the rain", "script").startswith("a girl in the rain, ")
     p = mv.prompt({"kind": "story", "line": "x"}, "f", "Little yellow flower in the story")
     assert "Little yellow flower" in p and "glasses" not in p
     assert "glasses" in mv.prompt({"kind": "singer", "line": ""}, "f") and "suit" in mv.prompt({"kind": "stage"}, "m")
@@ -1541,6 +1551,15 @@ def test_mv_build_edit_and_redraw(fake_youtube, monkeypatch):
     assert t["job"]["error"] is None and not t["dirty"] and len(drawn) == n + 1
     assert "Đóa hoa vàng nhỏ" in (f / "mv.json").read_text(encoding="utf-8")
     assert c.get(f"/api/mv/{t['id']}/files/../mv.json").status_code == 404
+    # đổi sang kịch bản tự viết: lên cảnh + vẽ lại cả bộ theo từng dòng
+    assert c.put(f"/api/mv/{t['id']}", json={"theme": "script", "script": " \n"}).status_code == 400
+    t = c.put(f"/api/mv/{t['id']}", json={"theme": "script", "script": "1. Cô gái dưới mưa\n\n- Hai người chung ô"}).json()
+    assert t["script"] == ["Cô gái dưới mưa", "Hai người chung ô"] and "images" not in t and not t["drawn"]
+    n = len(drawn)
+    c.post(f"/api/mv/{t['id']}/build")
+    t = wait(t["id"])
+    assert t["job"]["error"] is None and len(drawn) == n + 2 and [im["kind"] for im in t["images"]] == ["script"] * 2
+    assert drawn[-2].startswith("en: memory of Cô gái dưới mưa") and t["theme"] == "script" and not t["building"]
     assert c.delete(f"/api/mv/{t['id']}").json()["ok"] and not f.exists()
 
 
@@ -1582,3 +1601,49 @@ def test_info_only_calls_ignore_missing_formats(monkeypatch):
     assert music.info("https://www.youtube.com/watch?v=K2sZVlw5bts")["duration"] == 270
     yt.analyze("K2sZVlw5bts", 0)
     assert all(o.get("ignore_no_formats_error") for o in seen)
+
+
+def test_mv_crossfade_keeps_length(tmp_path):
+    """Hoà cảnh: các phần nối lại dài đúng bằng bài, cảnh mới hiện rõ đúng khung bắt đầu câu hát."""
+    from clipmaker import dub, mv
+    scenes = [{"s": 0.0, "d": 3.0, "img": 0}, {"s": 3.0, "d": 3.0, "img": 1}, {"s": 6.0, "d": 3.0, "img": 0}]
+    starts, end, sp, h = mv.spans(scenes, 9.0)
+    assert starts == [0, 90, 180] and end == 270 and h == mv.XFADE // 2
+    assert sp == [(0, 90 + h), (90 - h, 180 + h), (180 - h, 270)]
+    assert mv.spans(scenes[:1], 3.0)[3] == 0 and mv.spans([{"s": 0.0}, {"s": 1.0}], 2.0)[3] == 7   # cảnh ngắn: hoà ngắn lại
+    imgs = []
+    for i, c in enumerate(("red", "blue")):
+        p = tmp_path / f"{i}.jpg"
+        compose.run(["-f", "lavfi", "-i", f"color=c={c}:s=1344x768", "-frames:v", "1", str(p)])
+        imgs.append(p)
+    clips = [mv.scene(imgs[sc["img"]], tmp_path / f"c{k}.mp4", B - A, "h", k)
+             for k, (sc, (A, B)) in enumerate(zip(scenes, sp))]
+    parts = []
+    for k, (A, B) in enumerate(sp):
+        last = k == len(sp) - 1
+        parts.append(mv._segment(clips[k], None if last else clips[k + 1], 0 if k == 0 else starts[k] + h, A, B,
+                                 None if last else starts[k + 1], h, k, tmp_path / f"p{k}.mp4"))
+    frames = lambda p: int(subprocess.run([compose.FFMPEG, "-i", str(p), "-map", "0:v", "-f", "null", "-"],
+                                          capture_output=True, text=True).stderr.rsplit("frame=", 1)[1].split()[0])
+    assert sum(frames(p) for p in parts) == end
+    assert abs(dub.probe(parts[0])["duration"] - (90 + h) / mv.FPS) < 0.05
+
+
+def test_mv_resumes_after_restart(monkeypatch, tmp_path):
+    """Server tắt giữa lúc dựng MV: lần chạy sau tự dựng tiếp, xong thì bỏ cờ."""
+    monkeypatch.setattr(server, "DATA", tmp_path / "data")
+    ran = []
+
+    def build(mid, job):
+        assert server._mv_load(mid)["building"]           # đang dựng: cờ còn đó (tắt máy lúc này thì lần sau dựng tiếp)
+        ran.append(mid)
+    monkeypatch.setattr(server, "_mv_build", build)
+    for mid, flag in (("aaa111", True), ("bbb222", False)):
+        (server.DATA / "mv" / mid).mkdir(parents=True)
+        server._mv_save({"id": mid, "building": flag})
+    server._mv_resume()
+    for _ in range(100):
+        if server.JOBS.get("mv_aaa111", {}).get("done"):
+            break
+        time.sleep(0.05)
+    assert ran == ["aaa111"] and not server._mv_load("aaa111")["building"]

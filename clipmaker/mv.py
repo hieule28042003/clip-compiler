@@ -32,19 +32,73 @@ SINGER = {
          "small earrings, elegant black halter dress",
     "m": "a handsome young Asian male singer with short black hair, black suit jacket over a white shirt",
 }
+# chủ đề sân khấu: mỗi ảnh ca sĩ / sân khấu / khán giả một kiểu khác nhau (không vẽ đi vẽ lại một khung hình)
 KINDS = {
-    "singer": "close-up portrait of {S} singing emotionally into a microphone, eyes closed, concert stage, "
-              "deep blue spotlights, bokeh lights",
-    "stage": "wide shot of {S} standing alone on a grand concert stage, beams of blue light, sparkling lights, "
-             "light haze",
-    "audience": "audience in a dark concert hall listening to a sad song, moved, some with teary eyes, "
-                "blue stage light glow on faces",
-    "story": "{L}, emotional cinematic scene, young Asian couple, nostalgic mood, soft natural light",
+    "singer": ["close-up portrait of {S} singing emotionally into a microphone, eyes closed, deep blue spotlights, bokeh",
+               "side profile of {S} singing under a single warm spotlight, dark background, light haze",
+               "medium shot of {S} holding a vintage microphone stand, soft purple stage light, smoke",
+               "{S} sitting on the edge of the stage singing softly, golden backlight, sparkles",
+               "close-up of {S} with a tear on the cheek while singing, cold blue light"],
+    "stage": ["wide shot of {S} standing alone on a grand concert stage, beams of blue light, light haze",
+              "back view of {S} facing a sea of phone lights in a dark arena",
+              "{S} on a stage covered with falling paper snow, white spotlight, dreamy",
+              "aerial view of a round stage with {S} in the center, ring of lights, crowd in darkness"],
+    "audience": ["audience in a dark concert hall listening to a sad song, moved, blue stage light glow on faces",
+                 "a crowd waving phone flashlights like stars in a dark stadium",
+                 "two friends hugging in the audience at a concert, warm stage light"],
 }
-STORY_FALLBACK = "a nostalgic memory of a young couple in an autumn park, falling leaves"
-STYLE = "cinematic film still, photorealistic, dramatic lighting, shallow depth of field, high detail, no text"
-# thứ tự cảnh: xen ca sĩ hát với cảnh minh hoạ lời, thỉnh thoảng toàn cảnh sân khấu / khán giả
 PATTERN = ["singer", "story", "stage", "story", "singer", "audience", "story", "singer", "story", "stage"]
+SHOTS = ["wide establishing shot", "close-up", "medium shot", "silhouette against the light", "over-the-shoulder shot",
+         "aerial view", "low angle shot", "detail shot", "back view", "reflection in a rainy window",
+         "long shot with a lot of empty space", "soft-focus foreground shot"]
+THEMES = {
+    "love": {"name": "Chuyện tình theo lời bài hát",
+             "who": "a young Asian couple (she has long black hair, he has short black hair)",
+             "style": "cinematic film still, romantic drama, photorealistic, soft natural light, shallow depth of field",
+             "fallback": ["a young couple walking in an autumn park with falling leaves",
+                          "a girl waiting alone at a rainy bus stop at night",
+                          "two people sharing an umbrella on a lamp-lit street",
+                          "a girl looking out of a train window at sunset",
+                          "two coffee cups on an empty cafe table by the window",
+                          "a boy riding a bicycle along a seaside road",
+                          "an old photo of a smiling couple lying on a wooden desk",
+                          "a couple watching fireworks from a rooftop"]},
+    "scenery": {"name": "Phong cảnh (không người)", "who": "",
+                "shots": ["wide panorama", "aerial view", "golden hour view", "misty morning view",
+                          "long exposure night view", "view framed by tree branches", "low angle view",
+                          "view across still water"],
+                "style": "breathtaking landscape photography, no people, cinematic light, high detail",
+                "fallback": ["misty mountains at dawn", "a quiet lake reflecting the sunset",
+                             "cherry blossoms falling on an empty country road", "a lonely lighthouse by a stormy sea",
+                             "a field of reeds under the full moon", "city lights seen from a hill at night",
+                             "a snowy forest with soft morning light", "golden rice fields under a cloudy sky"]},
+    "anime": {"name": "Anime", "who": "anime-style young couple",
+              "style": "anime film illustration, highly detailed background art, vivid colors, dramatic sky, soft light",
+              "fallback": ["a girl standing under a huge summer sky with towering clouds",
+                           "a train crossing a sea at sunset", "a rainy street with glowing shop signs",
+                           "a rooftop at dusk with the city below", "a classroom bathed in afternoon light",
+                           "a field of sunflowers and a lone figure", "stars over a quiet town at night"]},
+    "ancient": {"name": "Cổ trang", "who": "a young man and woman in ancient Chinese hanfu",
+                "style": "ancient Chinese costume drama film still, photorealistic, misty, elegant, cinematic light",
+                "fallback": ["a pavilion on a misty lake", "peach blossoms falling in an ancient courtyard",
+                             "a lantern-lit ancient street at night", "a lone swordsman on a bamboo forest path",
+                             "a woman playing the guqin under a willow tree", "an ancient palace roof in the snow"]},
+    "city": {"name": "Thành phố đêm mưa", "who": "a lonely young person",
+             "style": "cinematic night photography, rain, neon reflections, moody, lo-fi aesthetic",
+             "fallback": ["a rainy city street with neon reflections",
+                          "a person on a rooftop overlooking the city at night",
+                          "raindrops on a window with blurred city lights", "an empty subway platform late at night",
+                          "a convenience store glowing on a rainy corner", "a taxi passing through a wet crosswalk"]},
+    "stage": {"name": "Ca sĩ trên sân khấu", "who": "a young Asian couple",
+              "style": "cinematic film still, photorealistic, dramatic lighting, shallow depth of field",
+              "fallback": ["a young couple walking in an autumn park with falling leaves",
+                           "a girl looking out of a rainy window", "two people sharing an umbrella at night"]},
+    "script": {"name": "Tự viết kịch bản", "who": "",
+               "style": "cinematic film still, photorealistic, high detail, beautiful lighting", "fallback": []},
+}
+STYLE_END = "no text, no watermark"
+STORY_FALLBACK = THEMES["love"]["fallback"][0]
+MAX_SCRIPT = 24
 LANG_TAG = {"zh": "#nhactrung", "ko": "#nhachan", "ja": "#nhacnhat", "th": "#nhacthai", "en": "#nhacaumy"}
 
 
@@ -79,18 +133,31 @@ def cuts(tl, total):
     return out
 
 
-def plan(tl, total, n_max=MAX_IMAGES):
-    """-> (cảnh [{s, d, img}], ảnh [{kind, line}]). Cảnh đầu (nhạc dạo) là ca sĩ trên sân khấu;
-    ảnh minh hoạ lấy câu hát đang vang lúc cảnh bắt đầu."""
+def _distinct_line(tl, s, used):
+    """Câu hát cho cảnh bắt đầu lúc s: câu đang vang, đã dùng (điệp khúc lặp lại) thì lấy câu chưa dùng gần nhất phía sau."""
+    now = next((x for t0, t1, x in tl if t0 <= s + 1.0 < t1), "") or next((x for t0, _, x in tl if t0 >= s), "")
+    if now and now not in used:
+        return now
+    later = [x for t0, _, x in tl if t0 >= s and x not in used] + [x for t0, _, x in tl if x not in used]
+    return later[0] if later else now
+
+
+def plan(tl, total, n_max=MAX_IMAGES, theme="love", script=()):
+    """-> (cảnh [{s, d, img}], ảnh [{kind, line, k}]). Mỗi ảnh một câu hát khác nhau (k: số thứ tự để chọn góc máy);
+    kịch bản tự viết: mỗi dòng một ảnh, theo thứ tự."""
     sc = cuts(tl, total)
-    n = min(len(sc), n_max)
-    images = []
-    for i in range(n):
-        s = sc[i][0]
-        kind = "stage" if i == 0 else PATTERN[(i - 1) % len(PATTERN)]
-        line = next((x for t0, t1, x in tl if t0 <= s + 1.0 < t1), "") or \
-            next((x for t0, _, x in tl if t0 >= s), "")
-        images.append({"kind": kind, "line": line})
+    if theme == "script" and script:
+        n = min(len(script), MAX_SCRIPT, len(sc))
+        images = [{"kind": "script", "line": x, "k": i} for i, x in enumerate(script[:n])]
+    else:
+        n = min(len(sc), n_max)
+        images, used = [], set()
+        for i in range(n):
+            kind = "story" if theme != "stage" else "stage" if i == 0 else PATTERN[(i - 1) % len(PATTERN)]
+            line = _distinct_line(tl, sc[i][0], used)
+            if kind == "story" and line:
+                used.add(line)
+            images.append({"kind": kind, "line": line, "k": i})
     return [{"s": round(s, 3), "d": round(d, 3), "img": i % n} for i, (s, d) in enumerate(sc)], images
 
 
@@ -103,14 +170,30 @@ def _drawable(en):
     return len(words) >= 3 and sum(w in NOTES for w in words) <= len(words) / 2
 
 
-def prompt(img, singer, en=""):
-    if img["kind"] == "story":
-        what = f"a scene illustrating the lyric \"{re.sub(r'[\"“”]', '', en).strip(' .,')}\"" if _drawable(en) \
-            else STORY_FALLBACK
-        body = KINDS["story"].format(L=what)
+def prompt(img, singer, en="", theme="love"):
+    """Mô tả ảnh (tiếng Anh) cho AI vẽ: chủ đề + góc máy khác nhau từng ảnh + câu hát / dòng kịch bản."""
+    th = THEMES.get(theme, THEMES["love"])
+    k = img.get("k", 0)
+    if img["kind"] == "script":
+        return f"{_clean_en(en) or img['line']}, {th['style']}, {STYLE_END}"
+    if img["kind"] in KINDS:
+        opts = KINDS[img["kind"]]
+        body = opts[k % len(opts)].format(S=SINGER.get(singer, SINGER["f"]))
+        return f"{body}, concert photography, {THEMES['stage']['style']}, {STYLE_END}"
+    shots = th.get("shots", SHOTS)
+    shot = shots[k % len(shots)]
+    if _drawable(en):
+        body = f"{shot} of a scene illustrating the lyric \"{_clean_en(en)}\""
+        if th["who"]:
+            body += f", featuring {th['who']}"
     else:
-        body = KINDS[img["kind"]].format(S=SINGER.get(singer, SINGER["f"]))
-    return f"{body}, {STYLE}"
+        fb = th["fallback"] or THEMES["love"]["fallback"]
+        body = f"{shot} of {fb[k % len(fb)]}"
+    return f"{body}, {th['style']}, {STYLE_END}"
+
+
+def _clean_en(en):
+    return re.sub(r'["“”]', "", en or "").strip(" .,")
 
 
 # ---------- vẽ ảnh ----------
@@ -163,29 +246,63 @@ def draw(text, seed, out, key="", stop=lambda: False, wait=lambda sec: None, tri
 
 
 # ---------- dựng ----------
+XFADE = 24                       # khung: hoà sang cảnh mới trong 0.8 giây, cảnh mới hiện rõ đúng lúc vào câu hát
+TRANSITIONS = ["fade", "smoothleft", "fade", "smoothup", "fade", "fadeblack", "fade", "smoothright"]
+SUPER = 3                        # phóng ảnh gấp 3 rồi mới zoom / lia: chuyển động mịn, không rung từng điểm ảnh
+
+
 def _motion(k, n):
-    """Chuyển động cảnh thứ k (n khung): xen kẽ zoom vào / zoom ra, lia trái / phải / đứng giữa."""
-    z = f"1.0+0.12*on/{n}" if k % 2 == 0 else f"1.12-0.12*on/{n}"
-    x = [f"iw/2-(iw/zoom/2)", f"(iw-iw/zoom)*on/{n}", f"(iw-iw/zoom)*(1-on/{n})"][k % 3]
+    """Chuyển động cảnh thứ k (n khung): xen kẽ zoom vào / zoom ra, lia trái / phải / đứng giữa; tốc độ êm
+    (nửa đều, nửa chậm dần ở hai đầu) để lúc hoà cảnh không bị khựng."""
+    p = f"(on/{max(1, n - 1)})"
+    e = f"(0.5*{p}+0.5*{p}*{p}*(3-2*{p}))"
+    z = f"1.0+0.12*{e}" if k % 2 == 0 else f"1.12-0.12*{e}"
+    x = ["iw/2-(iw/zoom/2)", f"(iw-iw/zoom)*{e}", f"(iw-iw/zoom)*(1-{e})"][k % 3]
     return f"zoompan=z='{z}':x='{x}':y='ih/2-(ih/zoom/2)':d={n}"
 
 
-def scene(img, out, dur, fmt, k):
-    """Một cảnh: ảnh tĩnh chuyển động nhẹ. Ngang: ảnh kín khung. Dọc: ảnh 16:9 giữa nền mờ của chính ảnh."""
+def scene(img, out, n, fmt, k):
+    """Một cảnh n khung: ảnh tĩnh chuyển động nhẹ. Ngang: ảnh kín khung. Dọc: ảnh 16:9 giữa nền mờ của chính ảnh."""
     W, H = SIZES[fmt]
-    n = max(1, round(dur * FPS))
+    n = max(1, n)
     if fmt == "h":
-        vf = (f"scale=3840:2160:force_original_aspect_ratio=increase,crop=3840:2160,{_motion(k, n)}:s={W}x{H}:fps={FPS},"
+        sw, sh = W * SUPER, H * SUPER
+        vf = (f"scale={sw}:{sh}:force_original_aspect_ratio=increase,crop={sw}:{sh},{_motion(k, n)}:s={W}x{H}:fps={FPS},"
               "vignette=PI/6,format=yuv420p")
         args = ["-i", str(img), "-vf", vf]
     else:
         fh = round(W * 9 / 16 / 2) * 2
         fc = (f"[0:v]split[a][b];[a]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},gblur=sigma=40,"
               f"eq=brightness=-0.22:saturation=1.1,loop=loop=-1:size=1,fps={FPS}[bg];"
-              f"[b]scale=2160:{fh * 2}:force_original_aspect_ratio=increase,crop=2160:{fh * 2},"
+              f"[b]scale={W * SUPER}:{fh * SUPER}:force_original_aspect_ratio=increase,crop={W * SUPER}:{fh * SUPER},"
               f"{_motion(k, n)}:s={W}x{fh}:fps={FPS}[fg];[bg][fg]overlay=0:{FG_Y},format=yuv420p")
         args = ["-i", str(img), "-filter_complex", fc]
     compose.run([*args, "-frames:v", str(n), *compose.VCODEC, "-an", str(out)])
+    return out
+
+
+def spans(scenes, total):
+    """Khung bắt đầu từng cảnh + đoạn khung [A, B) mỗi clip cảnh cần dựng (thêm nửa thời gian hoà cảnh ở hai đầu
+    để chồng lên cảnh trước / sau) -> (starts, end, [(A, B)], h)."""
+    starts = [round(sc["s"] * FPS) for sc in scenes]
+    end = round(total * FPS)
+    lens = [y - x for x, y in zip(starts, starts[1:] + [end])]
+    h = min(XFADE // 2, min(lens) // 4) if len(scenes) > 1 else 0
+    out = [(0 if k == 0 else f - h, end if k == len(starts) - 1 else starts[k + 1] + h) for k, f in enumerate(starts)]
+    return starts, end, out, h
+
+
+def _segment(clip, nxt, start, A, B, F_next, h, k, out):
+    """Phần video từ khung `start` tới B: thân cảnh + (nếu có cảnh sau) hoà sang cảnh sau quanh khung F_next."""
+    n = B - start
+    fc = f"[0:v]trim=start_frame={start - A},setpts=PTS-STARTPTS"
+    args = ["-i", str(clip)]
+    if nxt is not None and h:
+        args += ["-i", str(nxt)]
+        fc += (f"[x];[1:v]trim=end_frame={2 * h},setpts=PTS-STARTPTS[y];[x][y]xfade=transition="
+               f"{TRANSITIONS[k % len(TRANSITIONS)]}:duration={2 * h / FPS:.4f}:offset={(F_next - h - start) / FPS:.4f}")
+    compose.run([*args, "-filter_complex", fc + ",format=yuv420p", "-frames:v", str(n), *compose.VCODEC, "-an",
+                 str(out)])
     return out
 
 
@@ -321,12 +438,22 @@ def render(scenes, images, tl, vi, song, artist, audio, a, b, fmt, out, work, st
     """Dựng một bản (fmt "h" ngang / "v" dọc) -> out MP4."""
     work = Path(work)
     total = b - a
-    parts = []
-    for k, sc in enumerate(scenes):
+    starts, end, sp, h = spans(scenes, total)
+    clips = []
+    for k, (sc, (A, B)) in enumerate(zip(scenes, sp)):
         if stop():
             raise InterruptedError
-        parts.append(scene(images[sc["img"]], work / f"{fmt}_scene_{k:03d}.mp4", sc["d"], fmt, k))
-        report(0.85 * (k + 1) / len(scenes))
+        clips.append(scene(images[sc["img"]], work / f"{fmt}_scene_{k:03d}.mp4", B - A, fmt, k))
+        report(0.6 * (k + 1) / len(scenes))
+    parts = []
+    for k, (A, B) in enumerate(sp):
+        if stop():
+            raise InterruptedError
+        last = k == len(sp) - 1
+        start = 0 if k == 0 else starts[k] + h
+        parts.append(_segment(clips[k], None if last else clips[k + 1], start, A, B,
+                              None if last else starts[k + 1], h, k, work / f"{fmt}_part_{k:03d}.mp4"))
+        report(0.6 + 0.25 * (k + 1) / len(sp))
     lst = work / f"{fmt}_scenes.txt"
     lst.write_text("".join(f"file '{p.resolve().as_posix()}'\n" for p in parts), encoding="utf-8")
     bg = work / f"{fmt}_bg.mp4"

@@ -333,6 +333,8 @@ details summary { cursor: pointer; color: var(--accent); margin: 4px 0 8px; }
 #mKeyBox .row input { flex: 1 1 200px; min-width: 0; }
 @media (max-width: 640px) {
   .mvVids { flex-direction: column; }
+  .mvVids .vh { flex: none; width: 100%; }
   .mvVids .vv { width: 60%; max-width: 240px; margin: 0 auto; }
   .mvLines > div { grid-template-columns: 1fr; gap: 2px; }
 }
+#mvPage .three { grid-template-columns: 1fr 1fr; }

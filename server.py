@@ -1824,6 +1824,7 @@ def _tt_build(tid, job):
 
 # ---------- 🎶 MV lời bài hát ảnh AI ----------
 MV_FORMATS = ("h", "v", "hv")
+MV_IMAGES = (8, 12, 16, 24)         # số ảnh AI: ít ảnh vẽ nhanh hơn, các cảnh dùng lại ảnh với chuyển động khác
 MV_KEY_FILE = DATA / "ai_image.json"
 
 
@@ -1866,6 +1867,15 @@ class MvReq(BaseModel):
     length: int = 0
     formats: str = "hv"
     singer: str = "f"
+    images: int = 12
+    theme: str = "love"
+    script: str = ""
+
+
+def _mv_script(text):
+    """Kịch bản tự viết: mỗi dòng một cảnh (bỏ dòng trống, số thứ tự / gạch đầu dòng)."""
+    rows = [re.sub(r"^\s*(?:\d+[.)]|[-*•])\s*", "", x).strip()[:300] for x in (text or "").splitlines()]
+    return [x for x in rows if x][:mv.MAX_SCRIPT]
 
 
 @app.get("/api/mv-key")
@@ -1897,14 +1907,18 @@ def mv_create(req: MvReq):
     song = req.song.strip()
     if not song:
         raise HTTPException(400, "Nhập tên bài hát (Ca sĩ - Tên bài) hoặc link YouTube của bài")
-    if req.length not in TT_LENGTHS or req.formats not in MV_FORMATS or req.singer not in mv.SINGER:
+    if req.length not in TT_LENGTHS or req.formats not in MV_FORMATS or req.singer not in mv.SINGER \
+            or req.images not in MV_IMAGES or req.theme not in mv.THEMES:
         raise HTTPException(400, "Tuỳ chọn không hợp lệ")
+    script = _mv_script(req.script)
+    if req.theme == "script" and not script:
+        raise HTTPException(400, "Nhập kịch bản: mỗi dòng một cảnh muốn vẽ")
     mid = uuid.uuid4().hex[:12]
     (DATA / "mv" / mid).mkdir(parents=True)
     t = {"id": mid, "created": time.time(), "input": song[:200], "length": req.length, "formats": req.formats,
-         "singer": req.singer, "offset": 0.0, "title": song[:80], "warn": "", "stamp": "", "vi": {}, "img_v": {}}
+         "singer": req.singer, "n_img": req.images, "theme": req.theme, "script": script, "offset": 0.0, "title": song[:80], "warn": "", "stamp": "", "vi": {}, "img_v": {}}
     _mv_save(t)
-    _start_job("mv_" + mid, "build", lambda job: _mv_build(mid, job))
+    _mv_start(mid)
     return _mv_view(t)
 
 
@@ -1925,6 +1939,8 @@ class MvEdit(BaseModel):
     caption: str | None = None
     offset: float | None = None
     singer: str | None = None
+    theme: str | None = None
+    script: str | None = None
 
 
 @app.put("/api/mv/{mid}")
@@ -1942,6 +1958,21 @@ def mv_update(mid: str, e: MvEdit):
         t["dirty"] = True
     if e.singer in mv.SINGER and e.singer != t["singer"]:
         t["singer"] = e.singer           # chỉ ảnh vẽ lại sau đó mới theo ca sĩ mới
+    if e.theme is not None:
+        if e.theme not in mv.THEMES:
+            raise HTTPException(400, "Chủ đề không hợp lệ")
+        script = _mv_script(e.script) if e.script is not None else t.get("script", [])
+        if e.theme == "script" and not script:
+            raise HTTPException(400, "Nhập kịch bản: mỗi dòng một cảnh muốn vẽ")
+        if e.theme != t.get("theme", "stage") or script != t.get("script", []):
+            job = JOBS.get("mv_" + mid)
+            if job and not job["done"]:
+                raise HTTPException(409, "MV đang dựng, chờ xong hoặc bấm Huỷ")
+            t.update(theme=e.theme, script=script, img_v={}, dirty=True)   # lên cảnh + vẽ lại cả bộ ảnh
+            t.pop("scenes", None)
+            t.pop("images", None)
+            for img in _mv_dir(mid).glob("img_*.jpg"):
+                img.unlink()
     _mv_save(t)
     return _mv_view(t)
 
@@ -1949,7 +1980,7 @@ def mv_update(mid: str, e: MvEdit):
 @app.post("/api/mv/{mid}/build")
 def mv_build(mid: str):
     _mv_dir(mid)
-    _start_job("mv_" + mid, "build", lambda job: _mv_build(mid, job))
+    _mv_start(mid)
     return _mv_view(_mv_load(mid))
 
 
@@ -1981,7 +2012,7 @@ def mv_redraw(mid: str, i: int, r: MvRedraw):
         if r.prompt.strip():
             im["prompt"] = r.prompt.strip()[:800]
         elif not im.get("custom"):
-            im["prompt"] = mv.prompt(im, cur["singer"], im.get("en", ""))
+            im["prompt"] = mv.prompt(im, cur["singer"], im.get("en", ""), cur.get("theme", "stage"))
         im["custom"] = bool(r.prompt.strip()) or im.get("custom", False)
         mv.draw(im["prompt"], im["seed"], _mv_dir(mid) / f"img_{i:02d}.jpg", _mv_key(), lambda: job["stop"],
                 lambda sec: job.update(stage=f"Đang chờ lượt vẽ miễn phí (~{sec} giây)"))
@@ -2040,6 +2071,34 @@ def mv_delete(mid: str):
     return {"ok": True}
 
 
+def _mv_mark(mid, on):
+    """Đánh dấu MV đang dựng trong mv.json: server tắt giữa chừng thì lần chạy sau tự dựng tiếp."""
+    t = _mv_load(mid)
+    if t.get("building") != on:
+        t["building"] = on
+        _mv_save(t)
+
+
+def _mv_start(mid):
+    def work(job):
+        _mv_mark(mid, True)
+        try:
+            return _mv_build(mid, job)
+        finally:
+            _mv_mark(mid, False)
+    _start_job("mv_" + mid, "build", work)
+
+
+def _mv_resume():
+    """Khi server chạy lại: dựng tiếp các MV đang dựng dở (ảnh đã vẽ được giữ, không vẽ lại)."""
+    for f in (DATA / "mv").glob("*/mv.json") if (DATA / "mv").exists() else []:
+        try:
+            if json.loads(f.read_text(encoding="utf-8")).get("building"):
+                _mv_start(f.parent.name)
+        except (OSError, ValueError, HTTPException):
+            continue
+
+
 def _mv_draw_all(t, f, job):
     """Vẽ các ảnh còn thiếu (lần lượt: gói miễn phí chỉ cho 1 ảnh mỗi lúc)."""
     key = _mv_key()
@@ -2080,15 +2139,18 @@ def _mv_build(mid, job):
             t["vi"].update(zip(missing, dub.translate(missing, t["lang"])))
     if not t.get("scenes"):
         job["stage"] = "Đang lên cảnh cho MV"
-        scenes, images = mv.plan(plain, b - a)
-        story = [im["line"] for im in images if im["kind"] == "story" and im["line"]]
-        try:
-            en = dict(zip(story, dub.translate(story, t["lang"], "en"))) if t["lang"] != "en" else {x: x for x in story}
-        except Exception:
-            en = {}
+        theme = t.get("theme", "stage")          # MV làm trước khi có chủ đề: kiểu sân khấu
+        scenes, images = mv.plan(plain, b - a, t.get("n_img", mv.MAX_IMAGES), theme, t.get("script") or [])
+        en = {}
+        for kind, lang in (("story", t["lang"]), ("script", "auto")):
+            src = list(dict.fromkeys(im["line"] for im in images if im["kind"] == kind and im["line"]))
+            try:
+                en.update(zip(src, dub.translate(src, lang, "en")) if lang != "en" else {x: x for x in src})
+            except Exception:
+                pass
         for im in images:
             im.update(en=en.get(im["line"], ""), seed=random.randint(1, 10 ** 9))
-            im["prompt"] = mv.prompt(im, t["singer"], im["en"])
+            im["prompt"] = mv.prompt(im, t["singer"], im["en"], theme)
         t["scenes"], t["images"] = scenes, images
     _mv_save(t)
     _mv_draw_all(t, f, job)
@@ -3656,6 +3718,7 @@ _apply_cookies()
 def _start_scheduler():
     threading.Thread(target=_scheduler, daemon=True).start()
     threading.Thread(target=_social_loop, daemon=True).start()
+    _mv_resume()
 
 
 app.mount("/fonts", StaticFiles(directory=ROOT / "fonts"), name="fonts")
